@@ -11,6 +11,8 @@ config:
   timeout: 30                            # 可选：API 请求超时秒数（默认 30）
   download_timeout: 600                  # 可选：下载超时秒数（默认 600）
   retry: 2                               # 可选：请求失败重试次数（默认 2）
+  backup:                                # 可选：全局备份目录（启用备份/故障保护的 monior 会自动创建子目录）
+    dir: /tmp/updater/backups            # 备份根目录
 
 monitors:
   # ── qBittorrent Enhanced Edition ──────────────────────
@@ -31,26 +33,13 @@ monitors:
       /etc/init.d/qbittorrent restart
       sleep 1
       logger "qBittorrent updated successfully"
-    version_check:                           # 可选：本地版本检测
+    backup: 3                                # 可选：保留历史备份份数（需全局 backup 已配置）
+    failsafe: allow_post                     # 可选：故障保护模式 (true/false/allow_post, 默认 true)
+    version_check:                           # 可选：本地版本检测（启用后自动开启故障保护）
       command: "/usr/bin/qBittorrent-nox --version"  # 获取本地版本号的命令
       regex: "qBittorrent v([0-9.]+)"        # 提取版本号的正则（需包含一个捕获组）
       strip_prefix: "release-"               # 可选：比较前去除远程 tag 的前缀
-    backup:                                  # 可选：备份配置
-      enabled: true                          # 是否启用备份
-      dir: /tmp/updater/backups              # 备份保存目录
-      count: 3                               # 保留份数（超出自动删除最旧的）
 
-  # ── 示例：另一个 monitor ──────────────────────────────
-  # another-binary:
-  #   file: /usr/bin/another
-  #   interval: 1d
-  #   proxy: "socks5://127.0.0.1:1080"
-  #   regex: "^another_linux_amd64$"
-  #   repo: owner/another-repo
-  #   type: pre-release
-  #   pre_update: "killall another || true"
-  #   post_update: "/etc/init.d/another start"
-  #
   # ── 示例：含版本号的子目录路径（{version} 自动替换） ──
   # sing-box:
   #   file: /usr/bin/sing-box
@@ -59,3 +48,7 @@ monitors:
   #   repo: SagerNet/sing-box
   #   type: latest
   #   extract_path: "sing-box-{version}-linux-amd64/sing-box"
+  #   backup: 3
+  #   version_check:
+  #     command: "/usr/bin/sing-box version"
+  #     regex: "sing-box version ([0-9.]+)"

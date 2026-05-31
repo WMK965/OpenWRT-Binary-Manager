@@ -48,9 +48,9 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `extract_path` | 存档内要提取的文件路径，支持 `{tag}` / `{version}` 变量（可选） |
 | `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
 | `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
-| `backup.enabled` | 是否启用备份 |
-| `backup.dir` | 备份保存目录 |
-| `backup.count` | 保留的备份份数 |
+| `backup` | 全局备份目录配置：`dir`（备份根目录），可选 |
+| `monitors.<name>.backup` | 保留历史备份份数（如 `3`），需全局 backup 已配置，不填则不备份 |
+| `monitors.<name>.failsafe` | 故障保护：`true`（默认）/ `false` / `allow_post` |
 | `version_check.command` | 获取本地版本号的命令（可选） |
 | `version_check.regex` | 提取版本号的正则，需包含一个捕获组（可选） |
 | `version_check.strip_prefix` | 比较前去除远程 tag 的前缀，如 `release-`（可选） |
@@ -78,6 +78,43 @@ pre_update: "/etc/init.d/qbittorrent stop"
 ```
 
 > **注意**：`pre_update` 脚本执行失败（非零退出码）会中止本次更新；`post_update` 失败只记录警告，不影响更新结果。
+
+### 故障保护（Failsafe）
+
+**默认启用**，除非显式设置 `failsafe: false`。需配置全局 `backup.dir`。
+
+更新流程：
+
+1. 执行 `pre_update` 停止服务
+2. **保存故障保护副本** → `{backup.dir}/{monitor}/failsafe/`（原二进制直接复制）
+3. （可选）创建历史备份 → `{backup.dir}/{monitor}/{文件}_时间戳.zip`
+4. 替换二进制文件
+5. **校验新二进制**：执行 `version_check.command` 检测版本号
+6. **校验失败** → 自动恢复故障保护副本
+   - `failsafe: allow_post` → 恢复后仍执行 `post_update` 重启服务
+   - 默认 → 直接中止（服务可能仍处于停止状态）
+7. **校验通过** → 清除故障保护副本 → 执行 `post_update` 重启服务
+
+`failsafe` 取值：
+- `true`（默认）：正常故障保护
+- `false`：完全关闭
+- `allow_post`：恢复原文件后依然执行 post_update 脚本
+
+### 备份目录结构
+
+```
+{backup.dir}/
+├── qBittorrent-ee/
+│   ├── failsafe/
+│   │   └── qBittorrent-nox          # 故障保护副本（替换前的最新版本）
+│   ├── qBittorrent-nox_20260531_0800.zip
+│   └── qBittorrent-nox_20260530_1200.zip
+├── sing-box/
+│   ├── failsafe/
+│   │   └── sing-box
+│   └── sing-box_20260531_0801.zip
+└── ...
+```
 
 ## 使用
 

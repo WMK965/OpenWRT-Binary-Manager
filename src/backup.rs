@@ -5,14 +5,15 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::config::BackupConfig;
 use crate::t;
 
-pub fn backup_file(file_path: &Path, monitor_name: &str, config: &BackupConfig) -> Result<()> {
-    if !config.enabled {
-        return Ok(());
-    }
-
+/// Create a timestamped zip backup of a file under `backup_dir/{monitor_name}/`.
+pub fn backup_file(
+    file_path: &Path,
+    monitor_name: &str,
+    backup_dir: &Path,
+    count: usize,
+) -> Result<()> {
     if !file_path.exists() {
         warn!(
             "[{}] {}: {}",
@@ -23,7 +24,8 @@ pub fn backup_file(file_path: &Path, monitor_name: &str, config: &BackupConfig) 
         return Ok(());
     }
 
-    fs::create_dir_all(&config.dir).context("failed to create backup directory")?;
+    let mon_dir = backup_dir.join(monitor_name);
+    fs::create_dir_all(&mon_dir).context("failed to create backup directory")?;
 
     let file_name = file_path
         .file_name()
@@ -32,7 +34,7 @@ pub fn backup_file(file_path: &Path, monitor_name: &str, config: &BackupConfig) 
 
     let timestamp = Local::now().format("%Y%m%d_%H%M%S");
     let backup_name = format!("{}_{}.zip", file_name, timestamp);
-    let backup_path = config.dir.join(&backup_name);
+    let backup_path = mon_dir.join(&backup_name);
 
     create_zip_backup(file_path, file_name, &backup_path)?;
 
@@ -43,9 +45,104 @@ pub fn backup_file(file_path: &Path, monitor_name: &str, config: &BackupConfig) 
         backup_path.display()
     );
 
-    rotate_backups(&config.dir, file_name, config.count, monitor_name)?;
+    rotate_backups(&mon_dir, file_name, count, monitor_name)?;
 
     Ok(())
+}
+
+/// Save a failsafe copy of the current binary before replacement.
+pub fn save_failsafe(file_path: &Path, monitor_name: &str, backup_dir: &Path) -> Result<()> {
+    if !file_path.exists() {
+        return Ok(());
+    }
+
+    let failsafe_dir = backup_dir.join(monitor_name).join("failsafe");
+    fs::create_dir_all(&failsafe_dir).context("failed to create failsafe directory")?;
+
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("binary");
+
+    let failsafe_path = failsafe_dir.join(file_name);
+    fs::copy(file_path, &failsafe_path)
+        .context("failed to save failsafe backup")?;
+
+    info!(
+        "[{}] {}: {}",
+        monitor_name,
+        t!("Failsafe saved", "故障保护副本已保存"),
+        failsafe_path.display()
+    );
+
+    Ok(())
+}
+
+/// Restore the binary from the failsafe copy.
+pub fn restore_failsafe(file_path: &Path, monitor_name: &str, backup_dir: &Path) -> Result<()> {
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("binary");
+
+    let failsafe_path = backup_dir
+        .join(monitor_name)
+        .join("failsafe")
+        .join(file_name);
+
+    if !failsafe_path.exists() {
+        return Err(anyhow::anyhow!(
+            "failsafe backup not found at {}",
+            failsafe_path.display()
+        ));
+    }
+
+    fs::copy(&failsafe_path, file_path).context("failed to restore from failsafe")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        let _ = fs::set_permissions(file_path, perms);
+    }
+
+    info!(
+        "[{}] {}: {} -> {}",
+        monitor_name,
+        t!("Restored from failsafe", "已从故障保护恢复"),
+        failsafe_path.display(),
+        file_path.display()
+    );
+
+    Ok(())
+}
+
+/// Remove the failsafe copy after a successful update.
+pub fn cleanup_failsafe(file_path: &Path, monitor_name: &str, backup_dir: &Path) {
+    let file_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("binary");
+
+    let failsafe_path = backup_dir
+        .join(monitor_name)
+        .join("failsafe")
+        .join(file_name);
+
+    if failsafe_path.exists() {
+        if let Err(e) = fs::remove_file(&failsafe_path) {
+            warn!(
+                "[{}] {} {}: {}",
+                monitor_name,
+                t!("Failed to clean up failsafe", "清理故障保护文件失败"),
+                failsafe_path.display(),
+                e
+            );
+        } else {
+            let failsafe_dir = failsafe_path.parent().unwrap();
+            let _ = fs::remove_dir(failsafe_dir);
+        }
+    }
 }
 
 fn create_zip_backup(source: &Path, entry_name: &str, zip_path: &Path) -> Result<()> {

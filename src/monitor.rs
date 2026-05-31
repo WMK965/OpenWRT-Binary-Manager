@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use log::{info, warn};
+use log::{error, info, warn};
 use regex::Regex;
 use std::fs;
 use std::path::Path;
@@ -8,7 +8,7 @@ use std::process::Command;
 
 use crate::archive;
 use crate::backup;
-use crate::config::{GlobalConfig, MonitorConfig};
+use crate::config::{FailsafeMode, GlobalConfig, MonitorConfig};
 use crate::github;
 use crate::status::StatusFile;
 use crate::t;
@@ -135,8 +135,18 @@ pub async fn check_and_update(
         run_script(name, "pre_update", script)?;
     }
 
-    if let Some(backup_config) = &monitor.backup {
-        backup::backup_file(&monitor.file, name, backup_config)?;
+    // Failsafe: save current binary before replacing (independent of backup)
+    if monitor.failsafe != FailsafeMode::Off {
+        if let Some(backup_g) = &global.backup {
+            backup::save_failsafe(&monitor.file, name, &backup_g.dir)?;
+        }
+    }
+
+    // History backup: create timestamped zip (optional, count per monitor)
+    if let Some(count) = monitor.backup {
+        if let Some(backup_g) = &global.backup {
+            backup::backup_file(&monitor.file, name, &backup_g.dir, count)?;
+        }
     }
 
     if let Some(parent) = monitor.file.parent() {
@@ -162,6 +172,57 @@ pub async fn check_and_update(
         monitor.file.display(),
         release.tag_name
     );
+
+    // Verify new binary if version_check is configured
+    let verified = if monitor.failsafe != FailsafeMode::Off {
+        if let Some(vc) = &monitor.version_check {
+            let ok = detect_local_version(name, vc).is_some();
+            if !ok {
+                error!(
+                    "[{}] {}: {}",
+                    name,
+                    t!("New binary verification failed, restoring backup", "新二进制校验失败, 正在恢复备份"),
+                    monitor.file.display()
+                );
+                if let Some(backup_g) = &global.backup {
+                    if let Err(e) = backup::restore_failsafe(&monitor.file, name, &backup_g.dir) {
+                        error!("[{}] {}: {}", name, t!("Failed to restore failsafe", "故障保护恢复失败"), e);
+                    }
+                }
+                // allow_post: run post_update anyway to restart the service
+                if monitor.failsafe == FailsafeMode::AllowPost {
+                    if let Some(script) = &monitor.post_update {
+                        info!("[{}] {}: {} (allow_post)", name, t!("Running post_update", "执行 post_update"), script);
+                        if let Err(e) = run_script(name, "post_update", script) {
+                            warn!("[{}] {}: {}", name, t!("post_update failed (non-fatal)", "post_update 执行失败 (非致命)"), e);
+                        }
+                    }
+                }
+                cleanup_temp(name, &download_dest, &extract_dir);
+                return Err(anyhow!(
+                    "{}",
+                    t!("binary verification failed after update", "更新后二进制校验失败")
+                ));
+            }
+            info!(
+                "[{}] {}",
+                name,
+                t!("New binary verified successfully", "新二进制校验通过")
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Cleanup failsafe on success
+    if verified {
+        if let Some(backup_g) = &global.backup {
+            backup::cleanup_failsafe(&monitor.file, name, &backup_g.dir);
+        }
+    }
 
     if let Some(script) = &monitor.post_update {
         info!("[{}] {}: {}", name, t!("Running post_update", "执行 post_update"), script);

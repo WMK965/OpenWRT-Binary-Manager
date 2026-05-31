@@ -32,6 +32,8 @@ pub struct GlobalConfig {
     pub retry: u32,
     #[serde(default = "default_download_timeout")]
     pub download_timeout: u64,
+    #[serde(default)]
+    pub backup: Option<GlobalBackupConfig>,
 }
 
 fn default_concurrency() -> usize {
@@ -48,6 +50,30 @@ fn default_retry() -> u32 {
 
 fn default_download_timeout() -> u64 {
     600
+}
+
+/// 全局备份配置
+#[derive(Debug, Deserialize)]
+pub struct GlobalBackupConfig {
+    pub dir: PathBuf,
+}
+
+/// Failsafe mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailsafeMode {
+    On,
+    Off,
+    AllowPost,
+}
+
+impl Default for FailsafeMode {
+    fn default() -> Self {
+        FailsafeMode::On
+    }
+}
+
+fn default_failsafe() -> FailsafeMode {
+    FailsafeMode::On
 }
 
 /// 单个 monitor 的配置
@@ -68,24 +94,12 @@ pub struct MonitorConfig {
     pub pre_update: Option<String>,
     #[serde(default)]
     pub post_update: Option<String>,
-    #[serde(default)]
-    pub backup: Option<BackupConfig>,
+    #[serde(default, deserialize_with = "deserialize_backup")]
+    pub backup: Option<usize>,
+    #[serde(default = "default_failsafe", deserialize_with = "deserialize_failsafe")]
+    pub failsafe: FailsafeMode,
     #[serde(default)]
     pub version_check: Option<VersionCheckConfig>,
-}
-
-/// 备份配置
-#[derive(Debug, Deserialize)]
-pub struct BackupConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    pub dir: PathBuf,
-    #[serde(default = "default_backup_count")]
-    pub count: usize,
-}
-
-fn default_backup_count() -> usize {
-    3
 }
 
 /// 版本检测配置
@@ -132,6 +146,99 @@ where
     }
 
     deserializer.deserialize_str(DurationVisitor)
+}
+
+/// 自定义 backup 反序列化器：false → None, true → Some(3), N → Some(N)
+fn deserialize_backup<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct BackupVisitor;
+
+    impl<'de> Visitor<'de> for BackupVisitor {
+        type Value = Option<usize>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("false, true, or a number")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Option<usize>, E>
+        where
+            E: de::Error,
+        {
+            if v {
+                Ok(Some(3))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Option<usize>, E>
+        where
+            E: de::Error,
+        {
+            if v <= 0 {
+                Ok(None)
+            } else {
+                Ok(Some(v as usize))
+            }
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Option<usize>, E>
+        where
+            E: de::Error,
+        {
+            if v == 0 {
+                Ok(None)
+            } else {
+                Ok(Some(v as usize))
+            }
+        }
+    }
+
+    deserializer.deserialize_any(BackupVisitor)
+}
+
+/// 自定义 failsafe 反序列化器：true/未指定 → On, false → Off, "allow_post" → AllowPost
+fn deserialize_failsafe<'de, D>(deserializer: D) -> Result<FailsafeMode, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct FailsafeVisitor;
+
+    impl<'de> Visitor<'de> for FailsafeVisitor {
+        type Value = FailsafeMode;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("true, false, or 'allow_post'")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<FailsafeMode, E>
+        where
+            E: de::Error,
+        {
+            if v {
+                Ok(FailsafeMode::On)
+            } else {
+                Ok(FailsafeMode::Off)
+            }
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<FailsafeMode, E>
+        where
+            E: de::Error,
+        {
+            match v {
+                "allow_post" => Ok(FailsafeMode::AllowPost),
+                _ => Err(de::Error::custom(format!(
+                    "unknown failsafe value '{}', expected true, false, or 'allow_post'",
+                    v
+                ))),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(FailsafeVisitor)
 }
 
 /// 解析 duration 字符串
@@ -231,6 +338,8 @@ config:
   status: /tmp/updater/updater.status
   working-dir: /tmp/updater
   token: "ghp_test123"
+  backup:
+    dir: /tmp/updater/backups
 
 monitors:
   qBittorrent-ee:
@@ -243,13 +352,11 @@ monitors:
     extract_path: qbittorrent-nox
     pre_update: "/etc/init.d/qbittorrent stop"
     post_update: "/etc/init.d/qbittorrent restart"
+    backup: 3
+    failsafe: allow_post
     version_check:
       command: "/usr/bin/qBittorrent-nox --version"
       regex: "qBittorrent v([0-9.]+)"
-    backup:
-      enabled: true
-      dir: /tmp/updater/backups
-      count: 3
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.monitors.len(), 1);
@@ -262,8 +369,9 @@ monitors:
             m.pre_update.as_deref(),
             Some("/etc/init.d/qbittorrent stop")
         );
-        assert!(m.backup.as_ref().unwrap().enabled);
-        assert_eq!(m.backup.as_ref().unwrap().count, 3);
+        assert_eq!(m.backup, Some(3));
+        assert_eq!(m.failsafe, FailsafeMode::AllowPost);
+        assert!(config.config.backup.is_some());
         assert_eq!(
             config.config.token.as_deref(),
             Some("ghp_test123")
