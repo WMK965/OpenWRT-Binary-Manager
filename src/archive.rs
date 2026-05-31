@@ -6,6 +6,16 @@ use std::path::{Path, PathBuf};
 
 use crate::t;
 
+/// Substitute `{tag}` and `{version}` placeholders in a path.
+///
+/// - `{tag}` → full release tag (e.g., `v1.13.12`)
+/// - `{version}` → tag without leading `v`/`V` (e.g., `1.13.12`)
+pub fn resolve_extract_path(path: &str, tag: &str) -> String {
+    let version = tag.trim_start_matches('v').trim_start_matches('V');
+    path.replace("{tag}", tag)
+        .replace("{version}", version)
+}
+
 /// Determine if a file is an archive and extract it.
 ///
 /// - If `extract_path` is specified, only that file is extracted.

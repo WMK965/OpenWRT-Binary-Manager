@@ -45,7 +45,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `repo` | GitHub 仓库，格式 `owner/repo` |
 | `type` | `latest`（正式版）或 `pre-release`（预发布） |
 | `language` | 全局语言 `en_us` / `zh_cn`，留空自动检测系统环境（可选） |
-| `extract_path` | 存档内要提取的文件路径（可选） |
+| `extract_path` | 存档内要提取的文件路径，支持 `{tag}` / `{version}` 变量（可选） |
 | `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
 | `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
 | `backup.enabled` | 是否启用备份 |

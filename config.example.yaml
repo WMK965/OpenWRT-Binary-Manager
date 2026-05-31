@@ -18,7 +18,7 @@ monitors:
     regex: "^qbittorrent-enhanced-nox_x86_64-linux-musl_static\\.zip$"  # 匹配 asset 文件名
     repo: c0re100/qBittorrent-Enhanced-Edition  # GitHub 仓库（owner/repo）
     type: latest                             # latest 或 pre-release
-    extract_path: "qbittorrent-nox"          # 可选：存档内要提取的文件路径
+    extract_path: "qbittorrent-nox"          # 可选：存档内要提取的文件路径，支持 {tag} / {version} 变量
     pre_update: |                                   # 替换前执行的脚本（支持多行）
       /etc/init.d/qbittorrent stop
       sleep 2
@@ -45,3 +45,12 @@ monitors:
   #   type: pre-release
   #   pre_update: "killall another || true"
   #   post_update: "/etc/init.d/another start"
+  #
+  # ── 示例：含版本号的子目录路径（{version} 自动替换） ──
+  # sing-box:
+  #   file: /usr/bin/sing-box
+  #   interval: 1d
+  #   regex: "^sing-box-.+-linux-amd64\\.tar\\.gz$"
+  #   repo: SagerNet/sing-box
+  #   type: latest
+  #   extract_path: "sing-box-{version}-linux-amd64/sing-box"

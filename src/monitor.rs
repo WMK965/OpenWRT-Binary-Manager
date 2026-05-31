@@ -120,8 +120,12 @@ pub async fn check_and_update(
     let extract_dir = global.working_dir.join(format!("{}_extract", name));
     fs::create_dir_all(&extract_dir)?;
 
+    let resolved_path = monitor
+        .extract_path
+        .as_ref()
+        .map(|p| archive::resolve_extract_path(p, &release.tag_name));
     let binary_path =
-        archive::extract_if_archive(&download_dest, &extract_dir, &monitor.extract_path)?;
+        archive::extract_if_archive(&download_dest, &extract_dir, &resolved_path)?;
 
     if let Some(script) = &monitor.pre_update {
         info!("[{}] {}: {}", name, t!("Running pre_update", "执行 pre_update"), script);
