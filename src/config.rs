@@ -24,6 +24,24 @@ pub struct GlobalConfig {
     pub token: Option<String>,
     #[serde(default)]
     pub language: Option<String>,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+    #[serde(default = "default_retry")]
+    pub retry: u32,
+}
+
+fn default_concurrency() -> usize {
+    4
+}
+
+fn default_timeout() -> u64 {
+    30
+}
+
+fn default_retry() -> u32 {
+    2
 }
 
 /// 单个 monitor 的配置
@@ -72,6 +90,8 @@ fn default_backup_count() -> usize {
 pub struct VersionCheckConfig {
     pub command: String,
     pub regex: String,
+    #[serde(default)]
+    pub strip_prefix: Option<String>,
 }
 
 /// Release 类型

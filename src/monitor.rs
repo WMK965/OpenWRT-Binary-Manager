@@ -38,8 +38,11 @@ pub async fn check_and_update(
 
     info!("[{}] {}", name, t!("Checking for updates...", "检查更新中..."));
 
-    let api_client = github::build_client(&monitor.proxy, &global.token)?;
-    let release = github::get_release(&api_client, &monitor.repo, &monitor.release_type).await?;
+    let api_client = github::build_client(&monitor.proxy, &global.token, global.timeout)?;
+    let release = github::with_retry(global.retry, || {
+        github::get_release(&api_client, &monitor.repo, &monitor.release_type)
+    })
+    .await?;
     info!(
         "[{}] {}: {} (prerelease: {})",
         name,
@@ -59,7 +62,7 @@ pub async fn check_and_update(
 
     if let Some(vc) = &monitor.version_check {
         if let Some(local_version) = detect_local_version(name, vc) {
-            let remote_version = normalize_version(&release.tag_name);
+            let remote_version = normalize_version(&release.tag_name, &vc.strip_prefix);
             if local_version == remote_version {
                 info!(
                     "[{}] {} (local: {}, remote: {})",
@@ -212,8 +215,11 @@ pub async fn check_only(
         }
     }
 
-    let api_client = github::build_client(&monitor.proxy, &global.token)?;
-    let release = github::get_release(&api_client, &monitor.repo, &monitor.release_type).await?;
+    let api_client = github::build_client(&monitor.proxy, &global.token, global.timeout)?;
+    let release = github::with_retry(global.retry, || {
+        github::get_release(&api_client, &monitor.repo, &monitor.release_type)
+    })
+    .await?;
 
     report.push(format!(
         "{}: {} (prerelease: {})",
@@ -226,7 +232,7 @@ pub async fn check_only(
 
     if let Some(vc) = &monitor.version_check {
         if let Some(local_version) = detect_local_version(name, vc) {
-            let remote_version = normalize_version(&release.tag_name);
+            let remote_version = normalize_version(&release.tag_name, &vc.strip_prefix);
             report.push(format!("{}: {}", t!("Local version", "本地版本"), local_version));
             report.push(format!("{}: {}", t!("Remote version", "远程版本"), remote_version));
             if local_version == remote_version {
@@ -406,11 +412,12 @@ fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> O
     }
 }
 
-fn normalize_version(version: &str) -> String {
-    version
-        .trim()
-        .strip_prefix('v')
-        .or_else(|| version.trim().strip_prefix('V'))
-        .unwrap_or(version.trim())
-        .to_string()
+fn normalize_version(version: &str, strip_prefix: &Option<String>) -> String {
+    let version = version.trim();
+    let version = version.strip_prefix('v').or_else(|| version.strip_prefix('V')).unwrap_or(version);
+    if let Some(prefix) = strip_prefix {
+        version.strip_prefix(prefix.as_str()).unwrap_or(version).to_string()
+    } else {
+        version.to_string()
+    }
 }

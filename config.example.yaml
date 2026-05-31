@@ -7,6 +7,9 @@ config:
   token: ""                              # 可选：GitHub Personal Access Token
                                          # 无认证速率限制 60 次/小时，有 Token 可达 5000 次/小时
   language: ""                           # 可选：语言设置 (en_us / zh_cn)，留空自动检测
+  concurrency: 4                         # 可选：并发请求数（默认 4）
+  timeout: 30                            # 可选：API 请求超时秒数（默认 30）
+  retry: 2                               # 可选：请求失败重试次数（默认 2）
 
 monitors:
   # ── qBittorrent Enhanced Edition ──────────────────────
@@ -30,6 +33,7 @@ monitors:
     version_check:                           # 可选：本地版本检测
       command: "/usr/bin/qBittorrent-nox --version"  # 获取本地版本号的命令
       regex: "qBittorrent v([0-9.]+)"        # 提取版本号的正则（需包含一个捕获组）
+      strip_prefix: "release-"               # 可选：比较前去除远程 tag 的前缀
     backup:                                  # 可选：备份配置
       enabled: true                          # 是否启用备份
       dir: /tmp/updater/backups              # 备份保存目录

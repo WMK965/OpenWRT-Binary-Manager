@@ -53,6 +53,10 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `backup.count` | 保留的备份份数 |
 | `version_check.command` | 获取本地版本号的命令（可选） |
 | `version_check.regex` | 提取版本号的正则，需包含一个捕获组（可选） |
+| `version_check.strip_prefix` | 比较前去除远程 tag 的前缀，如 `release-`（可选） |
+| `concurrency` | 并发检查数（默认 4） |
+| `timeout` | API 请求超时秒数（默认 30） |
+| `retry` | 请求失败重试次数（默认 2） |
 
 ### 多行脚本
 

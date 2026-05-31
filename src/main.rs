@@ -9,8 +9,11 @@ mod status;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use futures_util::StreamExt;
 use log::{error, info};
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// OpenWrt Binary Update Manager
 ///
@@ -88,9 +91,28 @@ async fn main() -> Result<()> {
                     return Ok(());
                 }
             };
+            let status = Arc::new(status);
+            let cfg = Arc::new(cfg);
 
-            for (name, monitor) in &cfg.monitors {
-                match monitor::check_only(name, monitor, &cfg.config, &status).await {
+            let concurrency = cfg.config.concurrency.max(1);
+            let monitors: Vec<_> = cfg.monitors.iter().collect();
+
+            let results: Vec<_> = futures_util::stream::iter(monitors)
+                .map(|(name, monitor)| {
+                    let name = name.clone();
+                    let cfg = Arc::clone(&cfg);
+                    let status = Arc::clone(&status);
+                    async move {
+                        let result = monitor::check_only(&name, monitor, &cfg.config, &status).await;
+                        (name, result)
+                    }
+                })
+                .buffer_unordered(concurrency)
+                .collect()
+                .await;
+
+            for (name, result) in results {
+                match result {
                     Ok(report) => {
                         if !report.is_empty() {
                             println!("[{}]", name);
@@ -120,7 +142,7 @@ fn init_i18n(cfg: &config::Config) {
 }
 
 async fn run_all_monitors(cfg: &config::Config) {
-    let mut status = match status::StatusFile::load(&cfg.config.status) {
+    let status = match status::StatusFile::load(&cfg.config.status) {
         Ok(s) => s,
         Err(e) => {
             error!("{}: {}", t!("Failed to load status file", "无法加载状态文件"), e);
@@ -128,17 +150,51 @@ async fn run_all_monitors(cfg: &config::Config) {
         }
     };
 
-    for (name, monitor) in &cfg.monitors {
-        match monitor::check_and_update(name, monitor, &cfg.config, &mut status).await {
+    let status = Arc::new(Mutex::new(status));
+    let cfg = Arc::new(cfg);
+    let concurrency = cfg.config.concurrency.max(1);
+    let monitors: Vec<_> = cfg.monitors.iter().collect();
+
+    let results: Vec<_> = futures_util::stream::iter(monitors)
+        .map(|(name, monitor)| {
+            let name = name.clone();
+            let cfg = Arc::clone(&cfg);
+            let status = Arc::clone(&status);
+            async move {
+                let result = {
+                    let mut s = status.lock().await;
+                    monitor::check_and_update(&name, monitor, &cfg.config, &mut s).await
+                };
+                (name, result)
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+
+    let mut status = match Arc::try_unwrap(status) {
+        Ok(mutex) => mutex.into_inner(),
+        Err(arc) => {
+            let guard = arc.blocking_lock();
+            guard.clone()
+        }
+    };
+
+    for (name, result) in results {
+        match result {
             Ok(true) => info!("[{}] {}", name, t!("Update completed successfully", "更新成功完成")),
             Ok(false) => {}
             Err(e) => {
                 error!("[{}] {}: {:#}", name, t!("Error", "错误"), e);
-                status.update_check(name);
+                status.update_check(&name);
                 if let Err(save_err) = status.save(&cfg.config.status) {
                     error!("[{}] {}: {}", name, t!("Failed to save status after error", "错误后保存状态失败"), save_err);
                 }
             }
         }
+    }
+
+    if let Err(save_err) = status.save(&cfg.config.status) {
+        error!("{}: {}", t!("Failed to save status", "保存状态失败"), save_err);
     }
 }

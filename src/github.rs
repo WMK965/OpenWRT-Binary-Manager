@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
-use log::{debug, info};
+use log::{debug, info, warn};
 use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
@@ -26,10 +26,10 @@ pub struct Asset {
     pub size: u64,
 }
 
-pub fn build_client(proxy: &Option<String>, token: &Option<String>) -> Result<Client> {
+pub fn build_client(proxy: &Option<String>, token: &Option<String>, timeout_secs: u64) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent("openwrt-binary-manager/0.1.0")
-        .timeout(std::time::Duration::from_secs(30));
+        .timeout(std::time::Duration::from_secs(timeout_secs));
 
     if let Some(proxy_url) = proxy {
         if proxy_url.starts_with("socks5://") {
@@ -78,6 +78,32 @@ pub fn build_download_client(proxy: &Option<String>, token: &Option<String>) -> 
     }
 
     builder.build().context("failed to build download client")
+}
+
+/// Retry an async operation up to `retries` times with 1s delay between attempts.
+pub async fn with_retry<F, Fut, T>(retries: u32, f: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut last_err = None;
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            warn!(
+                "{} {}/{}: {}",
+                t!("Retrying", "重试中"),
+                attempt,
+                retries,
+                last_err.as_ref().unwrap()
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap())
 }
 
 pub async fn get_release(
