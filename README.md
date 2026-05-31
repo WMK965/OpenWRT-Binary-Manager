@@ -120,7 +120,3 @@ chmod +x /etc/init.d/binary-updater
 /etc/init.d/binary-updater enable
 /etc/init.d/binary-updater start
 ```
-
-## License
-
-MIT
