@@ -1,0 +1,154 @@
+# OpenWrt Binary Update Manager
+
+自动从 GitHub Releases 检测并更新 OpenWrt 上的二进制程序。
+
+## 功能特性
+
+- **自动检测更新**：定期检查 GitHub Releases，支持 `latest` 和 `pre-release`
+- **正则匹配**：通过正则表达式精确匹配目标 release asset
+- **代理支持**：HTTP 镜像前缀（如 `gh-proxy.com`）和 SOCKS5 代理
+- **存档解压**：自动处理 `.zip` / `.tar.gz` / `.tar.xz` 格式，支持指定提取路径
+- **前后脚本**：替换前后可执行自定义 shell 命令（如停止/重启服务）
+- **文件备份**：更新前自动备份旧版本，打包为 zip 防止意外执行，支持轮转保留
+- **GitHub Token**：支持配置 PAT 以提高 API 速率限制
+- **双运行模式**：默认单次运行（配合 cron），可选守护进程模式
+
+## 安装
+
+### 本地编译
+
+```bash
+cargo build --release
+```
+
+### 交叉编译（OpenWrt x86_64）
+
+```bash
+# 安装 musl 工具链
+rustup target add x86_64-unknown-linux-musl
+
+# 编译
+cargo build --release --target x86_64-unknown-linux-musl
+
+# 产物位于
+# target/x86_64-unknown-linux-musl/release/openwrt-binary-manager
+```
+
+## 配置
+
+将 `config.example.yaml` 复制为 `/etc/updater/config.yaml` 并编辑：
+
+```yaml
+config:
+  log: /tmp/updater/updater.log
+  status: /tmp/updater/updater.status
+  working-dir: /tmp/updater
+  token: ""
+
+monitors:
+  qBittorrent-ee:
+    file: /usr/bin/qBittorrent-nox
+    interval: 6h
+    proxy: ""
+    regex: "^qbittorrent-enhanced-nox_x86_64-linux-musl_static\\.zip$"
+    repo: c0re100/qBittorrent-Enhanced-Edition
+    type: latest
+    extract_path: "qbittorrent-nox"
+    pre_update: |
+      /etc/init.d/qbittorrent stop
+      sleep 2
+      killall qbittorrent-nox || true
+    post_update: |
+      /etc/init.d/qbittorrent restart
+      sleep 1
+      logger "qBittorrent updated"
+    backup:
+      enabled: true
+      dir: /tmp/updater/backups
+      count: 3
+```
+
+### 配置字段说明
+
+| 字段 | 说明 |
+|---|---|
+| `file` | 目标二进制文件路径 |
+| `interval` | 检查间隔，支持 `s`/`m`/`h`/`d` |
+| `proxy` | HTTP 镜像前缀或 `socks5://` 代理地址 |
+| `regex` | 匹配 release asset 文件名的正则表达式 |
+| `repo` | GitHub 仓库，格式 `owner/repo` |
+| `type` | `latest`（正式版）或 `pre-release`（预发布） |
+| `extract_path` | 存档内要提取的文件路径（可选） |
+| `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
+| `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
+| `backup.enabled` | 是否启用备份 |
+| `backup.dir` | 备份保存目录 |
+| `backup.count` | 保留的备份份数 |
+
+### 多行脚本
+
+`pre_update` 和 `post_update` 支持多行脚本，使用 YAML 的 `|`（literal block）语法：
+
+```yaml
+pre_update: |          # 注意 | 后换行，内容缩进
+  /etc/init.d/qbittorrent stop
+  sleep 2
+  killall qbittorrent-nox || true
+  echo "stopped"
+```
+
+也可以写成单行：
+
+```yaml
+pre_update: "/etc/init.d/qbittorrent stop"
+```
+
+> **注意**：`pre_update` 脚本执行失败（非零退出码）会中止本次更新；`post_update` 失败只记录警告，不影响更新结果。
+
+## 使用
+
+```bash
+# 单次运行（默认）
+openwrt-binary-manager -c /etc/updater/config.yaml
+
+# 守护进程模式（每 60 秒检查一轮）
+openwrt-binary-manager -c /etc/updater/config.yaml --daemon
+
+# 自定义守护进程间隔（每 300 秒）
+openwrt-binary-manager -c /etc/updater/config.yaml --daemon --interval 300
+```
+
+### 配合 cron 使用
+
+```bash
+# 每小时检查一次
+0 * * * * /usr/bin/openwrt-binary-manager -c /etc/updater/config.yaml
+```
+
+### procd 服务（OpenWrt）
+
+创建 `/etc/init.d/binary-updater`：
+
+```sh
+#!/bin/sh /etc/rc.common
+
+START=99
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/openwrt-binary-manager -c /etc/updater/config.yaml --daemon
+    procd_set_param respawn
+    procd_close_instance
+}
+```
+
+```bash
+chmod +x /etc/init.d/binary-updater
+/etc/init.d/binary-updater enable
+/etc/init.d/binary-updater start
+```
+
+## License
+
+MIT
