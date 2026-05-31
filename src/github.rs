@@ -53,10 +53,10 @@ pub fn build_client(proxy: &Option<String>, token: &Option<String>, timeout_secs
     builder.build().context("failed to build HTTP client")
 }
 
-pub fn build_download_client(proxy: &Option<String>, token: &Option<String>) -> Result<Client> {
+pub fn build_download_client(proxy: &Option<String>, token: &Option<String>, timeout_secs: u64) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent("openwrt-binary-manager/0.1.0")
-        .timeout(std::time::Duration::from_secs(600));
+        .timeout(std::time::Duration::from_secs(timeout_secs));
 
     if let Some(proxy_url) = proxy {
         if proxy_url.starts_with("socks5://") {
@@ -196,7 +196,54 @@ pub fn resolve_download_url(original_url: &str, proxy: &Option<String>) -> Strin
     }
 }
 
-pub async fn download_asset(client: &Client, url: &str, dest: &Path) -> Result<()> {
+pub async fn download_asset(
+    client: &Client,
+    url: &str,
+    dest: &Path,
+    retries: u32,
+) -> Result<()> {
+    // First try native tools (curl / wget), fall back to reqwest
+    if try_native_download(url, dest).is_ok() {
+        let size = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+        info!(
+            "{}: {} ({} bytes)",
+            t!("Download complete", "下载完成"),
+            dest.display(),
+            size
+        );
+        return Ok(());
+    }
+
+    with_retry(retries, || download_with_reqwest(client, url, dest)).await
+}
+
+fn try_native_download(url: &str, dest: &Path) -> Result<()> {
+    let tools = ["curl", "wget"];
+    for tool in &tools {
+        let (cmd, args): (&str, &[&str]) = match *tool {
+            "curl" => ("curl", &["-fSL", "-o", &dest.to_string_lossy(), "--connect-timeout", "30", "--max-time", "600", url]),
+            "wget" => ("wget", &["-q", "-O", &dest.to_string_lossy(), "--timeout=30", "--tries=3", url]),
+            _ => continue,
+        };
+
+        let status = std::process::Command::new(cmd)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                info!("{}: {} ({})", t!("Downloading via", "通过下载"), tool, url);
+                return Ok(());
+            }
+            _ => continue,
+        }
+    }
+    Err(anyhow!("no native download tool available"))
+}
+
+async fn download_with_reqwest(client: &Client, url: &str, dest: &Path) -> Result<()> {
     info!("{}: {}", t!("Downloading", "下载中"), url);
 
     let resp = client

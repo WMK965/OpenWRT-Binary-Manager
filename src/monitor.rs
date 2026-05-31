@@ -117,8 +117,8 @@ pub async fn check_and_update(
         github::resolve_download_url(&asset.browser_download_url, &monitor.proxy);
     let download_dest = global.working_dir.join(&asset.name);
 
-    let download_client = github::build_download_client(&monitor.proxy, &global.token)?;
-    github::download_asset(&download_client, &download_url, &download_dest).await?;
+    let download_client = github::build_download_client(&monitor.proxy, &global.token, global.download_timeout)?;
+    github::download_asset(&download_client, &download_url, &download_dest, global.retry).await?;
 
     let extract_dir = global.working_dir.join(format!("{}_extract", name));
     fs::create_dir_all(&extract_dir)?;

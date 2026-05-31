@@ -56,6 +56,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `version_check.strip_prefix` | 比较前去除远程 tag 的前缀，如 `release-`（可选） |
 | `concurrency` | 并发检查数（默认 4） |
 | `timeout` | API 请求超时秒数（默认 30） |
+| `download_timeout` | 下载超时秒数（默认 600） |
 | `retry` | 请求失败重试次数（默认 2） |
 
 ### 多行脚本

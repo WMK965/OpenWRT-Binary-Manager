@@ -30,6 +30,8 @@ pub struct GlobalConfig {
     pub timeout: u64,
     #[serde(default = "default_retry")]
     pub retry: u32,
+    #[serde(default = "default_download_timeout")]
+    pub download_timeout: u64,
 }
 
 fn default_concurrency() -> usize {
@@ -42,6 +44,10 @@ fn default_timeout() -> u64 {
 
 fn default_retry() -> u32 {
     2
+}
+
+fn default_download_timeout() -> u64 {
+    600
 }
 
 /// 单个 monitor 的配置

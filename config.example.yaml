@@ -9,6 +9,7 @@ config:
   language: ""                           # 可选：语言设置 (en_us / zh_cn)，留空自动检测
   concurrency: 4                         # 可选：并发请求数（默认 4）
   timeout: 30                            # 可选：API 请求超时秒数（默认 30）
+  download_timeout: 600                  # 可选：下载超时秒数（默认 600）
   retry: 2                               # 可选：请求失败重试次数（默认 2）
 
 monitors:

@@ -37,6 +37,8 @@ pub fn extract_if_archive(
         extract_tar_gz(file_path, output_dir, extract_path)
     } else if file_name.ends_with(".tar.xz") || file_name.ends_with(".txz") {
         extract_tar_xz(file_path, output_dir, extract_path)
+    } else if file_name.ends_with(".gz") {
+        decompress_gz(file_path, output_dir)
     } else {
         info!(
             "{}: {}",
@@ -178,4 +180,21 @@ fn extract_tar<R: Read>(
     }
 
     found_path.ok_or_else(|| anyhow!("tar archive is empty"))
+}
+
+/// Decompress a single `.gz` file (not tar.gz)
+fn decompress_gz(gz_path: &Path, output_dir: &Path) -> Result<PathBuf> {
+    info!("{}: {}", t!("Decompressing gz", "解压 gz"), gz_path.display());
+    let input = fs::File::open(gz_path).context("failed to open gz file")?;
+    let mut decoder = flate2::read::GzDecoder::new(input);
+
+    let stem = gz_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("decompressed");
+    let out_path = output_dir.join(stem);
+    let mut out_file = fs::File::create(&out_path).context("failed to create decompressed file")?;
+    io::copy(&mut decoder, &mut out_file).context("failed to decompress gz")?;
+    info!("{}: {} -> {}", t!("Decompressed", "已解压"), gz_path.display(), out_path.display());
+    Ok(out_path)
 }
