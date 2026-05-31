@@ -34,40 +34,6 @@ cargo build --release --target x86_64-unknown-linux-musl
 # target/x86_64-unknown-linux-musl/release/openwrt-binary-manager
 ```
 
-## 配置
-
-将 `config.example.yaml` 复制为 `/etc/updater/config.yaml` 并编辑：
-
-```yaml
-config:
-  log: /tmp/updater/updater.log
-  status: /tmp/updater/updater.status
-  working-dir: /tmp/updater
-  token: ""
-
-monitors:
-  qBittorrent-ee:
-    file: /usr/bin/qBittorrent-nox
-    interval: 6h
-    proxy: ""
-    regex: "^qbittorrent-enhanced-nox_x86_64-linux-musl_static\\.zip$"
-    repo: c0re100/qBittorrent-Enhanced-Edition
-    type: latest
-    extract_path: "qbittorrent-nox"
-    pre_update: |
-      /etc/init.d/qbittorrent stop
-      sleep 2
-      killall qbittorrent-nox || true
-    post_update: |
-      /etc/init.d/qbittorrent restart
-      sleep 1
-      logger "qBittorrent updated"
-    backup:
-      enabled: true
-      dir: /tmp/updater/backups
-      count: 3
-```
-
 ### 配置字段说明
 
 | 字段 | 说明 |
@@ -78,12 +44,15 @@ monitors:
 | `regex` | 匹配 release asset 文件名的正则表达式 |
 | `repo` | GitHub 仓库，格式 `owner/repo` |
 | `type` | `latest`（正式版）或 `pre-release`（预发布） |
+| `language` | 全局语言 `en_us` / `zh_cn`，留空自动检测系统环境（可选） |
 | `extract_path` | 存档内要提取的文件路径（可选） |
 | `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
 | `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
 | `backup.enabled` | 是否启用备份 |
 | `backup.dir` | 备份保存目录 |
 | `backup.count` | 保留的备份份数 |
+| `version_check.command` | 获取本地版本号的命令（可选） |
+| `version_check.regex` | 提取版本号的正则，需包含一个捕获组（可选） |
 
 ### 多行脚本
 
@@ -108,21 +77,24 @@ pre_update: "/etc/init.d/qbittorrent stop"
 ## 使用
 
 ```bash
-# 单次运行（默认）
-openwrt-binary-manager -c /etc/updater/config.yaml
+# 单次运行，检查并更新
+openwrt-binary-manager upgrade /etc/updater/config.yaml
 
 # 守护进程模式（每 60 秒检查一轮）
-openwrt-binary-manager -c /etc/updater/config.yaml --daemon
+openwrt-binary-manager daemon /etc/updater/config.yaml
 
 # 自定义守护进程间隔（每 300 秒）
-openwrt-binary-manager -c /etc/updater/config.yaml --daemon --interval 300
+openwrt-binary-manager daemon /etc/updater/config.yaml --interval 300
+
+# 检测模式，仅报告可用更新，不执行任何更改
+openwrt-binary-manager check /etc/updater/config.yaml
 ```
 
 ### 配合 cron 使用
 
 ```bash
 # 每小时检查一次
-0 * * * * /usr/bin/openwrt-binary-manager -c /etc/updater/config.yaml
+0 * * * * /usr/bin/openwrt-binary-manager upgrade /etc/updater/config.yaml
 ```
 
 ### procd 服务（OpenWrt）
@@ -137,7 +109,7 @@ USE_PROCD=1
 
 start_service() {
     procd_open_instance
-    procd_set_param command /usr/bin/openwrt-binary-manager -c /etc/updater/config.yaml --daemon
+    procd_set_param command /usr/bin/openwrt-binary-manager daemon /etc/updater/config.yaml
     procd_set_param respawn
     procd_close_instance
 }

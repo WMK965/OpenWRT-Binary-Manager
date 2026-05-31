@@ -8,8 +8,8 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::config::ReleaseType;
+use crate::t;
 
-/// GitHub Release 信息
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Release {
@@ -19,7 +19,6 @@ pub struct Release {
     pub assets: Vec<Asset>,
 }
 
-/// GitHub Release Asset
 #[derive(Debug, Deserialize)]
 pub struct Asset {
     pub name: String,
@@ -27,13 +26,11 @@ pub struct Asset {
     pub size: u64,
 }
 
-/// 构建 reqwest Client，根据 proxy 配置
 pub fn build_client(proxy: &Option<String>, token: &Option<String>) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent("openwrt-binary-manager/0.1.0")
         .timeout(std::time::Duration::from_secs(30));
 
-    // 设置 SOCKS5 代理
     if let Some(proxy_url) = proxy {
         if proxy_url.starts_with("socks5://") {
             let proxy = reqwest::Proxy::all(proxy_url)
@@ -42,7 +39,6 @@ pub fn build_client(proxy: &Option<String>, token: &Option<String>) -> Result<Cl
         }
     }
 
-    // 设置 GitHub Token
     if let Some(token) = token {
         if !token.is_empty() {
             let mut headers = reqwest::header::HeaderMap::new();
@@ -57,7 +53,6 @@ pub fn build_client(proxy: &Option<String>, token: &Option<String>) -> Result<Cl
     builder.build().context("failed to build HTTP client")
 }
 
-/// 构建下载用的 reqwest Client（超时更长）
 pub fn build_download_client(proxy: &Option<String>, token: &Option<String>) -> Result<Client> {
     let mut builder = Client::builder()
         .user_agent("openwrt-binary-manager/0.1.0")
@@ -85,7 +80,6 @@ pub fn build_download_client(proxy: &Option<String>, token: &Option<String>) -> 
     builder.build().context("failed to build download client")
 }
 
-/// 获取 release（根据 type）
 pub async fn get_release(
     client: &Client,
     repo: &str,
@@ -97,7 +91,6 @@ pub async fn get_release(
     }
 }
 
-/// 获取最新正式 release
 async fn get_latest_release(client: &Client, repo: &str) -> Result<Release> {
     let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
     debug!("GET {}", url);
@@ -112,11 +105,7 @@ async fn get_latest_release(client: &Client, repo: &str) -> Result<Release> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "GitHub API returned {}: {}",
-            status,
-            body
-        ));
+        return Err(anyhow!("GitHub API returned {}: {}", status, body));
     }
 
     resp.json::<Release>()
@@ -124,7 +113,6 @@ async fn get_latest_release(client: &Client, repo: &str) -> Result<Release> {
         .context("failed to parse release JSON")
 }
 
-/// 获取最新 pre-release
 async fn get_latest_prerelease(client: &Client, repo: &str) -> Result<Release> {
     let url = format!("https://api.github.com/repos/{}/releases?per_page=20", repo);
     debug!("GET {}", url);
@@ -139,11 +127,7 @@ async fn get_latest_prerelease(client: &Client, repo: &str) -> Result<Release> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!(
-            "GitHub API returned {}: {}",
-            status,
-            body
-        ));
+        return Err(anyhow!("GitHub API returned {}: {}", status, body));
     }
 
     let releases: Vec<Release> = resp
@@ -157,7 +141,6 @@ async fn get_latest_prerelease(client: &Client, repo: &str) -> Result<Release> {
         .ok_or_else(|| anyhow!("no pre-release found for {}", repo))
 }
 
-/// 用正则匹配 asset 文件名，返回匹配的 asset
 pub fn find_matching_asset<'a>(release: &'a Release, pattern: &str) -> Result<&'a Asset> {
     let re = Regex::new(pattern).context("invalid asset regex")?;
 
@@ -168,18 +151,18 @@ pub fn find_matching_asset<'a>(release: &'a Release, pattern: &str) -> Result<&'
         .ok_or_else(|| {
             let names: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
             anyhow!(
-                "no asset matched regex '{}'. Available assets: {:?}",
+                "{} '{}'. {}: {:?}",
+                t!("No asset matched regex", "无资源匹配正则"),
                 pattern,
+                t!("Available assets", "可用资源"),
                 names
             )
         })
 }
 
-/// 解析下载 URL，处理镜像前缀
 pub fn resolve_download_url(original_url: &str, proxy: &Option<String>) -> String {
     match proxy {
         Some(proxy_url) if !proxy_url.is_empty() && !proxy_url.starts_with("socks5://") => {
-            // HTTP/HTTPS 镜像前缀
             let prefix = proxy_url.trim_end_matches('/');
             format!("{}/{}", prefix, original_url)
         }
@@ -187,9 +170,8 @@ pub fn resolve_download_url(original_url: &str, proxy: &Option<String>) -> Strin
     }
 }
 
-/// 流式下载文件到指定路径
 pub async fn download_asset(client: &Client, url: &str, dest: &Path) -> Result<()> {
-    info!("Downloading: {}", url);
+    info!("{}: {}", t!("Downloading", "下载中"), url);
 
     let resp = client
         .get(url)
@@ -218,16 +200,16 @@ pub async fn download_asset(client: &Client, url: &str, dest: &Path) -> Result<(
         if let Some(total) = total_size {
             if total > 0 {
                 let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-                // 每 10% 打一次日志，避免日志过多
                 if pct % 10 == 0 && downloaded > 0 {
-                    debug!("Download progress: {}% ({}/{})", pct, downloaded, total);
+                    debug!("{}: {}% ({}/{})", t!("Download progress", "下载进度"), pct, downloaded, total);
                 }
             }
         }
     }
 
     info!(
-        "Download complete: {} ({} bytes)",
+        "{}: {} ({} bytes)",
+        t!("Download complete", "下载完成"),
         dest.display(),
         downloaded
     );
@@ -242,10 +224,7 @@ mod tests {
     fn test_resolve_download_url_no_proxy() {
         let url = "https://github.com/user/repo/releases/download/v1/file.zip";
         assert_eq!(resolve_download_url(url, &None), url);
-        assert_eq!(
-            resolve_download_url(url, &Some(String::new())),
-            url
-        );
+        assert_eq!(resolve_download_url(url, &Some(String::new())), url);
     }
 
     #[test]
@@ -262,7 +241,6 @@ mod tests {
     fn test_resolve_download_url_socks5_passthrough() {
         let url = "https://github.com/user/repo/releases/download/v1/file.zip";
         let proxy = Some("socks5://127.0.0.1:1080".to_string());
-        // SOCKS5 不修改 URL
         assert_eq!(resolve_download_url(url, &proxy), url);
     }
 
@@ -293,7 +271,6 @@ mod tests {
             "qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"
         );
 
-        // 不匹配的正则
         let pattern2 = r"^nonexistent\.zip$";
         assert!(find_matching_asset(&release, pattern2).is_err());
     }

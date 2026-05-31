@@ -2,89 +2,141 @@ mod archive;
 mod backup;
 mod config;
 mod github;
+mod i18n;
 mod logger;
 mod monitor;
 mod status;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::{error, info};
 use std::path::PathBuf;
 
 /// OpenWrt Binary Update Manager
 ///
-/// 自动从 GitHub Releases 检测并更新 OpenWrt 上的二进制程序
+/// Automatically detect and update binaries on OpenWrt from GitHub Releases
 #[derive(Parser, Debug)]
 #[command(name = "openwrt-binary-manager", version, about)]
 struct Cli {
-    /// 配置文件路径
-    #[arg(short, long, default_value = "/etc/updater/config.yaml")]
-    config: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
 
-    /// 守护进程模式（持续运行）
-    #[arg(short, long)]
-    daemon: bool,
-
-    /// 守护进程主循环间隔（秒）
-    #[arg(short, long, default_value_t = 60)]
-    interval: u64,
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Check for updates and install them (single run)
+    Upgrade {
+        /// Path to config file
+        config: PathBuf,
+    },
+    /// Run continuously as a daemon, checking for updates periodically
+    Daemon {
+        /// Path to config file
+        config: PathBuf,
+        /// Main loop interval in seconds
+        #[arg(short, long, default_value_t = 60)]
+        interval: u64,
+    },
+    /// Dry-run mode: check for available updates only (no changes made)
+    Check {
+        /// Path to config file
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // 加载配置
-    let cfg = config::load_config(&cli.config)?;
+    match cli.command {
+        Command::Upgrade { config } => {
+            let cfg = config::load_config(&config)?;
+            init_i18n(&cfg);
+            logger::init_logger(&cfg.config.log)?;
+            info!("=== OpenWrt Binary Manager (upgrade) ===");
+            info!("{}: {}", t!("Config", "配置文件"), config.display());
+            info!("{}: {}", t!("Monitors", "监控数量"), cfg.monitors.len());
 
-    // 初始化日志
-    logger::init_logger(&cfg.config.log)?;
-
-    info!("=== OpenWrt Binary Manager started ===");
-    info!("Config: {}", cli.config.display());
-    info!("Mode: {}", if cli.daemon { "daemon" } else { "once" });
-    info!("Monitors: {}", cfg.monitors.len());
-
-    // 确保 working_dir 存在
-    std::fs::create_dir_all(&cfg.config.working_dir)?;
-
-    if cli.daemon {
-        // 守护进程模式：循环执行
-        info!("Daemon loop interval: {}s", cli.interval);
-        loop {
+            std::fs::create_dir_all(&cfg.config.working_dir)?;
             run_all_monitors(&cfg).await;
-            tokio::time::sleep(std::time::Duration::from_secs(cli.interval)).await;
+            info!("{}", t!("=== Upgrade completed ===", "=== 更新完成 ==="));
         }
-    } else {
-        // 单次运行模式
-        run_all_monitors(&cfg).await;
-        info!("=== Single run completed ===");
+        Command::Daemon { config, interval } => {
+            let cfg = config::load_config(&config)?;
+            init_i18n(&cfg);
+            logger::init_logger(&cfg.config.log)?;
+            info!("=== OpenWrt Binary Manager (daemon) ===");
+            info!("{}: {}", t!("Config", "配置文件"), config.display());
+            info!("{}: {}s", t!("Daemon loop interval", "守护进程循环间隔"), interval);
+            info!("{}: {}", t!("Monitors", "监控数量"), cfg.monitors.len());
+
+            std::fs::create_dir_all(&cfg.config.working_dir)?;
+            loop {
+                run_all_monitors(&cfg).await;
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            }
+        }
+        Command::Check { config } => {
+            let cfg = config::load_config(&config)?;
+            init_i18n(&cfg);
+            std::fs::create_dir_all(&cfg.config.working_dir)?;
+
+            let status = match status::StatusFile::load(&cfg.config.status) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}: {}", t!("Failed to load status file", "无法加载状态文件"), e);
+                    return Ok(());
+                }
+            };
+
+            for (name, monitor) in &cfg.monitors {
+                match monitor::check_only(name, monitor, &cfg.config, &status).await {
+                    Ok(report) => {
+                        if !report.is_empty() {
+                            println!("[{}]", name);
+                            for line in &report {
+                                println!("  {}", line);
+                            }
+                            println!();
+                        }
+                    }
+                    Err(e) => eprintln!("[{}] {}: {:#}", name, t!("Error", "错误"), e),
+                }
+            }
+        }
     }
 
     Ok(())
 }
 
-/// 遍历所有 monitors 并执行检查/更新
+fn init_i18n(cfg: &config::Config) {
+    let lang = cfg
+        .config
+        .language
+        .as_deref()
+        .and_then(i18n::Lang::from_str)
+        .unwrap_or_else(i18n::detect_locale);
+    i18n::init(lang);
+}
+
 async fn run_all_monitors(cfg: &config::Config) {
-    // 每次运行时都重新加载 status，以支持外部修改
     let mut status = match status::StatusFile::load(&cfg.config.status) {
         Ok(s) => s,
         Err(e) => {
-            error!("Failed to load status file: {}", e);
+            error!("{}: {}", t!("Failed to load status file", "无法加载状态文件"), e);
             return;
         }
     };
 
     for (name, monitor) in &cfg.monitors {
         match monitor::check_and_update(name, monitor, &cfg.config, &mut status).await {
-            Ok(true) => info!("[{}] ✓ Update completed successfully", name),
-            Ok(false) => {} // 跳过（已在 monitor 内部打日志）
+            Ok(true) => info!("[{}] {}", name, t!("Update completed successfully", "更新成功完成")),
+            Ok(false) => {}
             Err(e) => {
-                error!("[{}] ✗ Error: {:#}", name, e);
-                // 即使出错也更新 last_check，避免对同一个错误不断重试
+                error!("[{}] {}: {:#}", name, t!("Error", "错误"), e);
                 status.update_check(name);
                 if let Err(save_err) = status.save(&cfg.config.status) {
-                    error!("[{}] Failed to save status after error: {}", name, save_err);
+                    error!("[{}] {}: {}", name, t!("Failed to save status after error", "错误后保存状态失败"), save_err);
                 }
             }
         }

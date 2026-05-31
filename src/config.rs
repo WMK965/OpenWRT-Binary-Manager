@@ -22,6 +22,8 @@ pub struct GlobalConfig {
     pub working_dir: PathBuf,
     #[serde(default)]
     pub token: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// 单个 monitor 的配置
@@ -44,6 +46,8 @@ pub struct MonitorConfig {
     pub post_update: Option<String>,
     #[serde(default)]
     pub backup: Option<BackupConfig>,
+    #[serde(default)]
+    pub version_check: Option<VersionCheckConfig>,
 }
 
 /// 备份配置
@@ -58,6 +62,16 @@ pub struct BackupConfig {
 
 fn default_backup_count() -> usize {
     3
+}
+
+/// 版本检测配置
+///
+/// 通过执行命令并正则提取版本号，与远程 release tag 比对，
+/// 若版本一致则跳过更新。正则必须包含一个捕获组用于提取版本号。
+#[derive(Debug, Deserialize)]
+pub struct VersionCheckConfig {
+    pub command: String,
+    pub regex: String,
 }
 
 /// Release 类型
@@ -142,6 +156,17 @@ pub fn load_config(path: &std::path::Path) -> Result<Config> {
         regex::Regex::new(&monitor.regex).map_err(|e| {
             anyhow!("monitor '{}': invalid regex '{}': {}", name, monitor.regex, e)
         })?;
+        // 验证 version_check 正则
+        if let Some(vc) = &monitor.version_check {
+            regex::Regex::new(&vc.regex).map_err(|e| {
+                anyhow!(
+                    "monitor '{}': invalid version_check regex '{}': {}",
+                    name,
+                    vc.regex,
+                    e
+                )
+            })?;
+        }
     }
 
     Ok(config)
@@ -192,6 +217,9 @@ monitors:
     extract_path: qbittorrent-nox
     pre_update: "/etc/init.d/qbittorrent stop"
     post_update: "/etc/init.d/qbittorrent restart"
+    version_check:
+      command: "/usr/bin/qBittorrent-nox --version"
+      regex: "qBittorrent v([0-9.]+)"
     backup:
       enabled: true
       dir: /tmp/updater/backups
@@ -214,5 +242,8 @@ monitors:
             config.config.token.as_deref(),
             Some("ghp_test123")
         );
+        let vc = m.version_check.as_ref().unwrap();
+        assert_eq!(vc.command, "/usr/bin/qBittorrent-nox --version");
+        assert_eq!(vc.regex, "qBittorrent v([0-9.]+)");
     }
 }
