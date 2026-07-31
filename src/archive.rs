@@ -1,3 +1,14 @@
+// archive.rs ── 归档解压模块
+//
+// 负责识别并解压下载的存档文件，支持以下格式：
+// - .zip        ：ZIP 归档
+// - .tar.gz/.tgz：gzip 压缩的 tar 归档
+// - .tar.xz/.txz：xz 压缩的 tar 归档
+// - .gz         ：单独的 gzip 文件（非 tar.gz）
+// - 其他        ：视为裸二进制文件，直接使用
+//
+// 支持通过 extract_path 指定存档内要提取的目标文件路径。
+
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
 use std::fs;
@@ -6,26 +17,32 @@ use std::path::{Path, PathBuf};
 
 use crate::t;
 
-/// Substitute `{tag}` and `{version}` placeholders in a path.
+/// 替换路径中的 `{tag}` 和 `{version}` 占位符。
 ///
-/// - `{tag}` → full release tag (e.g., `v1.13.12`)
-/// - `{version}` → tag without leading `v`/`V` (e.g., `1.13.12`)
+/// - `{tag}`     -> 完整的 release tag（如 `v1.13.12`）
+/// - `{version}` -> 去除前导 `v`/`V` 的版本号（如 `1.13.12`）
+///
+/// 例如 `sing-box-{version}-linux-amd64/sing-box` + tag `v1.2.3`
+///   -> `sing-box-1.2.3-linux-amd64/sing-box`
 pub fn resolve_extract_path(path: &str, tag: &str) -> String {
     let version = tag.trim_start_matches('v').trim_start_matches('V');
     path.replace("{tag}", tag)
         .replace("{version}", version)
 }
 
-/// Determine if a file is an archive and extract it.
+/// 判断文件是否为归档并执行解压。
 ///
-/// - If `extract_path` is specified, only that file is extracted.
-/// - Otherwise, the first file found (or only file) is returned.
-/// - If the file is not an archive, it is returned as-is (bare binary).
+/// - 若指定了 `extract_path`，则只提取该文件；
+/// - 否则提取第一个文件（或唯一文件）作为结果返回；
+/// - 若文件不是归档，则原样返回其路径（视为裸二进制）。
+///
+/// 返回值为最终提取出的二进制文件路径。
 pub fn extract_if_archive(
     file_path: &Path,
     output_dir: &Path,
     extract_path: &Option<String>,
 ) -> Result<PathBuf> {
+    // 根据文件扩展名判断归档类型
     let file_name = file_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -38,8 +55,10 @@ pub fn extract_if_archive(
     } else if file_name.ends_with(".tar.xz") || file_name.ends_with(".txz") {
         extract_tar_xz(file_path, output_dir, extract_path)
     } else if file_name.ends_with(".gz") {
+        // 单独的 .gz 文件（非 tar.gz），直接解压为单个文件
         decompress_gz(file_path, output_dir)
     } else {
+        // 非归档文件：直接作为裸二进制使用
         info!(
             "{}: {}",
             t!("File is not an archive, using as-is", "非存档文件, 直接使用"),
@@ -49,6 +68,10 @@ pub fn extract_if_archive(
     }
 }
 
+/// 解压 ZIP 归档
+///
+/// - 若指定 `extract_path`：按名称查找并仅提取该文件
+/// - 否则：提取所有文件，返回第一个被提取的文件路径
 fn extract_zip(
     zip_path: &Path,
     output_dir: &Path,
@@ -59,10 +82,12 @@ fn extract_zip(
     let mut archive = zip::ZipArchive::new(file).context("failed to read zip archive")?;
 
     if let Some(target) = extract_path {
+        // 按名称精确查找目标文件
         let mut entry = archive
             .by_name(target)
             .map_err(|e| anyhow!("file '{}' not found in zip: {}", target, e))?;
 
+        // 输出文件名取 target 的 basename（去除目录部分）
         let out_path = output_dir.join(
             Path::new(target)
                 .file_name()
@@ -74,18 +99,21 @@ fn extract_zip(
         info!("{}: {} -> {}", t!("Extracted", "已提取"), target, out_path.display());
         Ok(out_path)
     } else {
+        // 未指定目标文件：提取所有非目录条目
         let mut found_path: Option<PathBuf> = None;
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
             let name = entry.name().to_string();
 
+            // 跳过目录条目
             if entry.is_dir() {
                 continue;
             }
 
             debug!("ZIP entry: {}", name);
 
+            // 输出文件名取条目的 basename，避免重建目录结构
             let out_name = Path::new(&name)
                 .file_name()
                 .unwrap_or(std::ffi::OsStr::new(&name))
@@ -95,6 +123,7 @@ fn extract_zip(
                 fs::File::create(&out_path).context("failed to create extracted file")?;
             io::copy(&mut entry, &mut out_file)?;
 
+            // 记录第一个提取的文件作为返回值
             if found_path.is_none() {
                 found_path = Some(out_path.clone());
             }
@@ -106,6 +135,9 @@ fn extract_zip(
     }
 }
 
+/// 解压 .tar.gz 归档
+///
+/// 先用 gzip 解码器包装文件流，再交给通用的 tar 解压函数。
 fn extract_tar_gz(
     tar_path: &Path,
     output_dir: &Path,
@@ -117,6 +149,9 @@ fn extract_tar_gz(
     extract_tar(decompressor, output_dir, extract_path)
 }
 
+/// 解压 .tar.xz 归档
+///
+/// 先用 xz 解码器包装文件流，再交给通用的 tar 解压函数。
 fn extract_tar_xz(
     tar_path: &Path,
     output_dir: &Path,
@@ -128,6 +163,10 @@ fn extract_tar_xz(
     extract_tar(decompressor, output_dir, extract_path)
 }
 
+/// 通用的 tar 归档解压函数（支持任意实现了 Read 的解码器）
+///
+/// - 若指定 `extract_path`：仅提取路径匹配的条目（精确匹配或以 `/{target}` 结尾）
+/// - 否则：提取所有文件，返回第一个被提取的文件路径
 fn extract_tar<R: Read>(
     reader: R,
     output_dir: &Path,
@@ -141,6 +180,7 @@ fn extract_tar<R: Read>(
         let path = entry.path()?.to_path_buf();
         let path_str = path.to_string_lossy().to_string();
 
+        // 跳过目录条目
         if entry.header().entry_type().is_dir() {
             continue;
         }
@@ -148,6 +188,7 @@ fn extract_tar<R: Read>(
         debug!("TAR entry: {}", path_str);
 
         if let Some(target) = extract_path {
+            // 匹配规则：完整路径相等，或以 "/{target}" 结尾（兼容 tar 内含子目录的情况）
             if path_str == *target || path_str.ends_with(&format!("/{}", target)) {
                 let out_name = Path::new(target)
                     .file_name()
@@ -160,6 +201,7 @@ fn extract_tar<R: Read>(
                 return Ok(out_path);
             }
         } else {
+            // 未指定目标文件：提取所有条目
             let out_name = path
                 .file_name()
                 .unwrap_or(std::ffi::OsStr::new(&path_str));
@@ -169,12 +211,14 @@ fn extract_tar<R: Read>(
             io::copy(&mut entry, &mut out_file)?;
             info!("{}: {} -> {}", t!("Extracted", "已提取"), path_str, out_path.display());
 
+            // 记录第一个提取的文件作为返回值
             if found_path.is_none() {
                 found_path = Some(out_path);
             }
         }
     }
 
+    // 若指定了目标文件但未找到，返回错误
     if let Some(target) = extract_path {
         return Err(anyhow!("file '{}' not found in tar archive", target));
     }
@@ -182,12 +226,15 @@ fn extract_tar<R: Read>(
     found_path.ok_or_else(|| anyhow!("tar archive is empty"))
 }
 
-/// Decompress a single `.gz` file (not tar.gz)
+/// 解压单独的 .gz 文件（非 tar.gz）
+///
+/// gzip 文件解压后即为单个文件，输出文件名取原文件名去除 .gz 后缀。
 fn decompress_gz(gz_path: &Path, output_dir: &Path) -> Result<PathBuf> {
     info!("{}: {}", t!("Decompressing gz", "解压 gz"), gz_path.display());
     let input = fs::File::open(gz_path).context("failed to open gz file")?;
     let mut decoder = flate2::read::GzDecoder::new(input);
 
+    // 输出文件名 = 原文件名去掉 .gz 扩展名
     let stem = gz_path
         .file_stem()
         .and_then(|n| n.to_str())
