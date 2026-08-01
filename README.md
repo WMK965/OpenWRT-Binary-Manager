@@ -7,7 +7,7 @@
 - **自动检测更新**：定期检查 GitHub Releases，支持 `latest` 和 `pre-release`
 - **正则匹配**：通过正则表达式精确匹配目标 release asset
 - **代理支持**：HTTP 镜像前缀（如 `gh-proxy.com`）和 SOCKS5 代理
-- **存档解压**：自动处理 `.zip` / `.tar.gz` / `.tar.xz` 格式，支持指定提取路径
+- **存档解压**：自动处理 `.zip` / `.tar.gz` / `.tar.xz` / `.7z` 格式，支持指定提取路径
 - **前后脚本**：替换前后可执行自定义 shell 命令（如停止/重启服务）
 - **文件备份**：更新前自动备份旧版本，打包为 zip 防止意外执行，支持轮转保留
 - **GitHub Token**：支持配置 PAT 以提高 API 速率限制
@@ -48,8 +48,8 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `extract_path` | 存档内要提取的文件路径，支持 `{tag}` / `{version}` 变量（可选） |
 | `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
 | `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
-| `backup` | 全局备份目录配置：`dir`（备份根目录），可选 |
-| `monitors.<name>.backup` | 保留历史备份份数（如 `3`），需全局 backup 已配置，不填则不备份 |
+| `backup` | 全局备份目录路径，留空时自动推导为配置文件同目录下的 `backup/`（可选） |
+| `monitors.<name>.backup_count` | 保留历史备份份数（如 `3`，支持 `false`/`true`/数字），不填则不备份 |
 | `monitors.<name>.failsafe` | 故障保护：`true`（默认）/ `false` / `allow_post` |
 | `version_check.command` | 获取本地版本号的命令（可选） |
 | `version_check.regex` | 提取版本号的正则，需包含一个捕获组（可选） |
@@ -81,13 +81,15 @@ pre_update: "/etc/init.d/qbittorrent stop"
 
 ### 故障保护（Failsafe）
 
-**默认启用**，除非显式设置 `failsafe: false`。需配置全局 `backup.dir`。
+**默认启用**，除非显式设置 `failsafe: false`。
+
+备份目录通过全局 `backup` 配置；若留空，当任一 monitor 需要 failsafe 或 backup_count 时，自动在配置文件同目录下创建 `backup/` 并输出警告日志。
 
 更新流程：
 
 1. 执行 `pre_update` 停止服务
-2. **保存故障保护副本** → `{backup.dir}/{monitor}/failsafe/`（原二进制直接复制）
-3. （可选）创建历史备份 → `{backup.dir}/{monitor}/{文件}_时间戳.zip`
+2. **保存故障保护副本** → `{backup}/{monitor}/failsafe/`（原二进制直接复制）
+3. （可选）创建历史备份 → `{backup}/{monitor}/{文件}_时间戳.zip`
 4. 替换二进制文件
 5. **校验新二进制**：执行 `version_check.command` 检测版本号
 6. **校验失败** → 自动恢复故障保护副本
@@ -103,7 +105,7 @@ pre_update: "/etc/init.d/qbittorrent stop"
 ### 备份目录结构
 
 ```
-{backup.dir}/
+{backup}/
 ├── qBittorrent-ee/
 │   ├── failsafe/
 │   │   └── qBittorrent-nox          # 故障保护副本（替换前的最新版本）

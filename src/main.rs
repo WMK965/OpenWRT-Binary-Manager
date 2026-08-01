@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
         // ── 单次升级模式 ──────────────────────────────────────────
         Command::Upgrade { config } => {
             // 读取并校验 YAML 配置文件
-            let cfg = config::load_config(&config)?;
+            let mut cfg = config::load_config(&config)?;
             // 根据配置初始化语言（中文/英文）
             init_i18n(&cfg);
             // 初始化日志系统（同时写入文件与 stderr）
@@ -80,13 +80,15 @@ async fn main() -> Result<()> {
 
             // 确保工作目录存在（用于存放下载和解压的临时文件）
             std::fs::create_dir_all(&cfg.config.working_dir)?;
+            // 确保备份目录存在（若未显式配置则自动创建并输出警告）
+            config::ensure_backup_dir(&mut cfg)?;
             // 并发执行所有 monitor 的检查与更新流程
             run_all_monitors(&cfg).await;
             info!("{}", t!("=== Upgrade completed ===", "=== 更新完成 ==="));
         }
         // ── 守护进程模式 ──────────────────────────────────────────
         Command::Daemon { config, interval } => {
-            let cfg = config::load_config(&config)?;
+            let mut cfg = config::load_config(&config)?;
             init_i18n(&cfg);
             logger::init_logger(&cfg.config.log)?;
             info!("=== OpenWrt Binary Manager (daemon) ===");
@@ -95,6 +97,8 @@ async fn main() -> Result<()> {
             info!("{}: {}", t!("Monitors", "监控数量"), cfg.monitors.len());
 
             std::fs::create_dir_all(&cfg.config.working_dir)?;
+            // 确保备份目录存在（若未显式配置则自动创建并输出警告）
+            config::ensure_backup_dir(&mut cfg)?;
             // 无限循环：每轮检查所有 monitor，然后休眠 interval 秒
             loop {
                 run_all_monitors(&cfg).await;

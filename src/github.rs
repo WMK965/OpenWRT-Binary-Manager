@@ -353,7 +353,7 @@ async fn download_with_reqwest(client: &Client, url: &str, dest: &Path) -> Resul
         if let Some(total) = total_size {
             if total > 0 {
                 let pct = (downloaded as f64 / total as f64 * 100.0) as u32;
-                if pct % 10 == 0 && downloaded > 0 {
+                if pct.is_multiple_of(10) && downloaded > 0 {
                     debug!("{}: {}% ({}/{})", t!("Download progress", "下载进度"), pct, downloaded, total);
                 }
             }

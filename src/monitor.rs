@@ -187,19 +187,15 @@ pub async fn check_and_update(
 
     // ── 步骤 8：保存故障保护副本 ──────────────────────────────
     // 在替换前保存当前二进制副本，以便更新失败时恢复
-    // 注意：故障保护与历史备份独立，只要 failsafe 未关闭且配置了全局 backup 目录就会执行
+    // 只要 failsafe 未关闭就会执行（备份目录由全局 backup_dir 提供）
     if monitor.failsafe != FailsafeMode::Off {
-        if let Some(backup_g) = &global.backup {
-            backup::save_failsafe(&monitor.file, name, &backup_g.dir)?;
-        }
+        backup::save_failsafe(&monitor.file, name, &global.backup_dir)?;
     }
 
     // ── 步骤 9：创建历史备份（可选） ──────────────────────────
-    // 按 monitor.backup 配置的保留份数创建带时间戳的 zip 备份
-    if let Some(count) = monitor.backup {
-        if let Some(backup_g) = &global.backup {
-            backup::backup_file(&monitor.file, name, &backup_g.dir, count)?;
-        }
+    // 按 monitor.backup_count 配置的保留份数创建带时间戳的 zip 备份
+    if let Some(count) = monitor.backup_count {
+        backup::backup_file(&monitor.file, name, &global.backup_dir, count)?;
     }
 
     // ── 步骤 10：替换目标二进制文件 ───────────────────────────
@@ -245,10 +241,8 @@ pub async fn check_and_update(
                     t!("New binary verification failed, restoring backup", "新二进制校验失败, 正在恢复备份"),
                     monitor.file.display()
                 );
-                if let Some(backup_g) = &global.backup {
-                    if let Err(e) = backup::restore_failsafe(&monitor.file, name, &backup_g.dir) {
-                        error!("[{}] {}: {}", name, t!("Failed to restore failsafe", "故障保护恢复失败"), e);
-                    }
+                if let Err(e) = backup::restore_failsafe(&monitor.file, name, &global.backup_dir) {
+                    error!("[{}] {}: {}", name, t!("Failed to restore failsafe", "故障保护恢复失败"), e);
                 }
                 // allow_post 模式：恢复后仍执行 post_update 脚本以重启服务
                 if monitor.failsafe == FailsafeMode::AllowPost {
@@ -284,9 +278,7 @@ pub async fn check_and_update(
 
     // ── 步骤 12：清理故障保护副本（仅校验通过时） ────────────
     if verified {
-        if let Some(backup_g) = &global.backup {
-            backup::cleanup_failsafe(&monitor.file, name, &backup_g.dir);
-        }
+        backup::cleanup_failsafe(&monitor.file, name, &global.backup_dir);
     }
 
     // ── 步骤 13：执行 post_update 脚本 ────────────────────────

@@ -4,6 +4,7 @@
 // - .zip        ：ZIP 归档
 // - .tar.gz/.tgz：gzip 压缩的 tar 归档
 // - .tar.xz/.txz：xz 压缩的 tar 归档
+// - .7z         ：7z 归档（LZMA/LZMA2）
 // - .gz         ：单独的 gzip 文件（非 tar.gz）
 // - 其他        ：视为裸二进制文件，直接使用
 //
@@ -54,6 +55,8 @@ pub fn extract_if_archive(
         extract_tar_gz(file_path, output_dir, extract_path)
     } else if file_name.ends_with(".tar.xz") || file_name.ends_with(".txz") {
         extract_tar_xz(file_path, output_dir, extract_path)
+    } else if file_name.ends_with(".7z") {
+        extract_7z(file_path, output_dir, extract_path)
     } else if file_name.ends_with(".gz") {
         // 单独的 .gz 文件（非 tar.gz），直接解压为单个文件
         decompress_gz(file_path, output_dir)
@@ -224,6 +227,85 @@ fn extract_tar<R: Read>(
     }
 
     found_path.ok_or_else(|| anyhow!("tar archive is empty"))
+}
+
+/// 解压 7z 归档
+///
+/// - 若指定 `extract_path`：仅提取路径匹配的条目（精确匹配或以 `/{target}` 结尾）
+/// - 否则：全量解压，返回第一个被提取的文件路径
+fn extract_7z(
+    sevenz_path: &Path,
+    output_dir: &Path,
+    extract_path: &Option<String>,
+) -> Result<PathBuf> {
+    info!("{}: {}", t!("Extracting 7z", "解压 7z"), sevenz_path.display());
+
+    if let Some(target) = extract_path {
+        // 有 extract_path：使用自定义提取函数，仅提取匹配的条目
+        let out_name = Path::new(target)
+            .file_name()
+            .unwrap_or(std::ffi::OsStr::new(target));
+        let out_path = output_dir.join(out_name);
+
+        let target_owned = target.clone();
+        let out_path_owned = out_path.clone();
+
+        sevenz_rust2::decompress_file_with_extract_fn(
+            sevenz_path,
+            output_dir,
+            move |entry, reader, _dest| {
+                let name = entry.name();
+                // 匹配规则与 tar 一致：完整路径相等，或以 "/{target}" 结尾
+                if name == target_owned || name.ends_with(&format!("/{}", target_owned)) {
+                    let mut out_file = fs::File::create(&out_path_owned)?;
+                    io::copy(reader, &mut out_file)?;
+                    info!(
+                        "{}: {} -> {}",
+                        t!("Extracted", "已提取"),
+                        name,
+                        out_path_owned.display()
+                    );
+                }
+                // 返回 false 跳过默认提取逻辑（由闭包自行处理写入）
+                Ok(false)
+            },
+        )
+        .context("failed to extract 7z archive")?;
+
+        if !out_path.exists() {
+            return Err(anyhow!("file '{}' not found in 7z archive", target));
+        }
+        Ok(out_path)
+    } else {
+        // 无 extract_path：全量解压，扫描返回第一个文件
+        sevenz_rust2::decompress_file(sevenz_path, output_dir)
+            .context("failed to extract 7z archive")?;
+
+        // 在解压目录中查找第一个文件
+        let mut found_path: Option<PathBuf> = None;
+        find_first_file(output_dir, &mut found_path)?;
+
+        found_path.ok_or_else(|| anyhow!("7z archive is empty"))
+    }
+}
+
+/// 递归查找目录中的第一个文件（用于 7z 全量解压后获取结果路径）
+fn find_first_file(dir: &Path, found: &mut Option<PathBuf>) -> Result<()> {
+    if found.is_some() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            find_first_file(&path, found)?;
+        } else {
+            debug!("7z entry: {}", path.display());
+            *found = Some(path);
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// 解压单独的 .gz 文件（非 tar.gz）

@@ -2,7 +2,7 @@
 //
 // 定义 YAML 配置文件的数据结构，并实现：
 // - 自定义 Duration 反序列化（支持 "30s"/"5m"/"1h"/"1d" 等人类可读格式）
-// - 自定义 backup 字段反序列化（支持 false/true/数字 三种写法）
+// - 自定义 backup_count 字段反序列化（支持 false/true/数字 三种写法）
 // - 自定义 failsafe 字段反序列化（支持 true/false/"allow_post"）
 // - 配置加载与校验（repo 格式、正则合法性）
 
@@ -51,9 +51,15 @@ pub struct GlobalConfig {
     /// 可选：下载超时秒数（默认 600）
     #[serde(default = "default_download_timeout")]
     pub download_timeout: u64,
-    /// 可选：全局备份目录配置（启用备份/故障保护的 monitor 会在此下创建子目录）
+    /// 可选：全局备份目录路径（各 monitor 的备份存放于 `{backup}/{monitor_name}/` 子目录下）
+    /// 留空时自动推导为配置文件同目录下的 `backup/`，并在需要时自动创建（输出警告日志）
     #[serde(default)]
-    pub backup: Option<GlobalBackupConfig>,
+    pub backup: Option<PathBuf>,
+    /// 实际使用的备份目录（运行时计算，不从 YAML 反序列化）
+    /// - 若 `backup` 已配置则使用其值
+    /// - 否则自动推导为配置文件同目录下的 `backup/`
+    #[serde(skip)]
+    pub backup_dir: PathBuf,
 }
 
 // ── 默认值函数 ──────────────────────────────────────────────
@@ -74,29 +80,17 @@ fn default_download_timeout() -> u64 {
     600
 }
 
-/// 全局备份配置
-#[derive(Debug, Deserialize)]
-pub struct GlobalBackupConfig {
-    /// 备份根目录，各 monitor 的备份将存放于 `{dir}/{monitor_name}/` 子目录下
-    pub dir: PathBuf,
-}
-
 /// Failsafe 故障保护模式
 ///
 /// - `On`        ：启用故障保护（默认），更新失败时自动恢复
 /// - `Off`       ：完全关闭故障保护
 /// - `AllowPost` ：更新失败恢复后，仍执行 post_update 脚本以重启服务
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum FailsafeMode {
+    #[default]
     On,
     Off,
     AllowPost,
-}
-
-impl Default for FailsafeMode {
-    fn default() -> Self {
-        FailsafeMode::On
-    }
 }
 
 fn default_failsafe() -> FailsafeMode {
@@ -130,10 +124,10 @@ pub struct MonitorConfig {
     /// 可选：替换后执行的 shell 脚本（支持多行）
     #[serde(default)]
     pub post_update: Option<String>,
-    /// 可选：保留历史备份份数（需全局 backup 已配置）
+    /// 可选：保留历史备份份数
     /// 反序列化支持：false -> None, true -> Some(3), N -> Some(N)
-    #[serde(default, deserialize_with = "deserialize_backup")]
-    pub backup: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_backup_count")]
+    pub backup_count: Option<usize>,
     /// 可选：故障保护模式 (true/false/allow_post, 默认 true)
     #[serde(default = "default_failsafe", deserialize_with = "deserialize_failsafe")]
     pub failsafe: FailsafeMode,
@@ -194,13 +188,13 @@ where
     deserializer.deserialize_str(DurationVisitor)
 }
 
-/// 自定义 backup 反序列化器：false -> None, true -> Some(3), N -> Some(N)
+/// 自定义 backup_count 反序列化器：false -> None, true -> Some(3), N -> Some(N)
 ///
 /// 这样配置文件中可以灵活写：
-/// - `backup: false`     -> 不备份
-/// - `backup: true`      -> 备份并保留默认 3 份
-/// - `backup: 5`         -> 备份并保留 5 份
-fn deserialize_backup<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+/// - `backup_count: false`  -> 不备份
+/// - `backup_count: true`   -> 备份并保留默认 3 份
+/// - `backup_count: 5`      -> 备份并保留 5 份
+fn deserialize_backup_count<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -342,7 +336,7 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 pub fn load_config(path: &std::path::Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("failed to read config file '{}': {}", path.display(), e))?;
-    let config: Config = serde_yaml::from_str(&content)
+    let mut config: Config = serde_yaml::from_str(&content)
         .map_err(|e| anyhow!("failed to parse config file '{}': {}", path.display(), e))?;
 
     // 验证每个 monitor 的配置合法性
@@ -372,7 +366,50 @@ pub fn load_config(path: &std::path::Path) -> Result<Config> {
         }
     }
 
+    // 计算实际备份目录：
+    // - 若 backup 已显式配置，使用其值
+    // - 否则自动推导为配置文件同目录下的 `backup/`
+    let config_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    config.config.backup_dir = config
+        .config
+        .backup
+        .clone()
+        .unwrap_or_else(|| config_dir.join("backup"));
+
     Ok(config)
+}
+
+/// 确保备份目录存在（在 logger 初始化后调用）
+///
+/// 当 `config.backup` 未显式配置（自动推导）时：
+/// - 检查是否有任一 monitor 需要 failsafe（未关闭）或 backup_count
+/// - 若需要则创建备份目录并输出警告日志
+///
+/// 当 `config.backup` 已显式配置时，目录创建由 backup 函数惰性处理。
+pub fn ensure_backup_dir(cfg: &mut Config) -> Result<()> {
+    if cfg.config.backup.is_some() {
+        return Ok(());
+    }
+
+    // 判断是否有 monitor 需要 failsafe 或历史备份
+    let needs_backup = cfg
+        .monitors
+        .values()
+        .any(|m| m.failsafe != FailsafeMode::Off || m.backup_count.is_some());
+
+    if needs_backup {
+        log::warn!(
+            "{}: {}",
+            crate::t!(
+                "Backup directory not configured, auto-creating",
+                "未配置备份目录, 自动创建"
+            ),
+            cfg.config.backup_dir.display()
+        );
+        std::fs::create_dir_all(&cfg.config.backup_dir)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -411,8 +448,7 @@ config:
   status: /tmp/updater/updater.status
   working-dir: /tmp/updater
   token: "ghp_test123"
-  backup:
-    dir: /tmp/updater/backups
+  backup: /tmp/updater/backups
 
 monitors:
   qBittorrent-ee:
@@ -425,7 +461,7 @@ monitors:
     extract_path: qbittorrent-nox
     pre_update: "/etc/init.d/qbittorrent stop"
     post_update: "/etc/init.d/qbittorrent restart"
-    backup: 3
+    backup_count: 3
     failsafe: allow_post
     version_check:
       command: "/usr/bin/qBittorrent-nox --version"
@@ -442,9 +478,12 @@ monitors:
             m.pre_update.as_deref(),
             Some("/etc/init.d/qbittorrent stop")
         );
-        assert_eq!(m.backup, Some(3));
+        assert_eq!(m.backup_count, Some(3));
         assert_eq!(m.failsafe, FailsafeMode::AllowPost);
-        assert!(config.config.backup.is_some());
+        assert_eq!(
+            config.config.backup.as_deref(),
+            Some(std::path::Path::new("/tmp/updater/backups"))
+        );
         assert_eq!(
             config.config.token.as_deref(),
             Some("ghp_test123")
