@@ -31,8 +31,10 @@ pub struct GlobalConfig {
     /// 状态文件路径（JSON 格式，记录各 monitor 运行状态）
     pub status: PathBuf,
     /// 工作目录（下载和解压的临时文件存放于此）
-    #[serde(rename = "working-dir")]
     pub working_dir: PathBuf,
+    /// 可选：下载后是否校验 checksum（默认开启）
+    #[serde(default = "default_checksum_verify")]
+    pub checksum_verify: bool,
     /// 可选：GitHub Personal Access Token，用于提升 API 速率限制
     #[serde(default)]
     pub token: Option<String>,
@@ -78,6 +80,14 @@ fn default_retry() -> u32 {
 
 fn default_download_timeout() -> u64 {
     600
+}
+
+/// checksum 校验默认开启。
+///
+/// 只有当 YAML 中显式写 `config.checksum_verify: false` 时才关闭，
+/// 避免自动更新流程在默认配置下跳过下载完整性校验。
+fn default_checksum_verify() -> bool {
+    true
 }
 
 /// Failsafe 故障保护模式
@@ -129,7 +139,10 @@ pub struct MonitorConfig {
     #[serde(default, deserialize_with = "deserialize_backup_count")]
     pub backup_count: Option<usize>,
     /// 可选：故障保护模式 (true/false/allow_post, 默认 true)
-    #[serde(default = "default_failsafe", deserialize_with = "deserialize_failsafe")]
+    #[serde(
+        default = "default_failsafe",
+        deserialize_with = "deserialize_failsafe"
+    )]
     pub failsafe: FailsafeMode,
     /// 可选：本地版本检测配置
     /// 配置后会通过执行命令获取本地版本号，与远程 tag 比对决定是否需要更新
@@ -351,7 +364,12 @@ pub fn load_config(path: &std::path::Path) -> Result<Config> {
         }
         // 验证 asset 匹配正则是否合法
         regex::Regex::new(&monitor.regex).map_err(|e| {
-            anyhow!("monitor '{}': invalid regex '{}': {}", name, monitor.regex, e)
+            anyhow!(
+                "monitor '{}': invalid regex '{}': {}",
+                name,
+                monitor.regex,
+                e
+            )
         })?;
         // 验证 version_check 正则是否合法
         if let Some(vc) = &monitor.version_check {
@@ -446,7 +464,8 @@ mod tests {
 config:
   log: /tmp/updater/updater.log
   status: /tmp/updater/updater.status
-  working-dir: /tmp/updater
+  working_dir: /tmp/updater
+  checksum_verify: false
   token: "ghp_test123"
   backup: /tmp/updater/backups
 
@@ -484,12 +503,31 @@ monitors:
             config.config.backup.as_deref(),
             Some(std::path::Path::new("/tmp/updater/backups"))
         );
-        assert_eq!(
-            config.config.token.as_deref(),
-            Some("ghp_test123")
-        );
+        assert_eq!(config.config.token.as_deref(), Some("ghp_test123"));
+        assert!(!config.config.checksum_verify);
         let vc = m.version_check.as_ref().unwrap();
         assert_eq!(vc.command, "/usr/bin/qBittorrent-nox --version");
         assert_eq!(vc.regex, "qBittorrent v([0-9.]+)");
+    }
+
+    /// 测试：checksum 校验默认开启
+    #[test]
+    fn test_checksum_verify_defaults_to_true() {
+        let yaml = r#"
+config:
+  log: /tmp/updater/updater.log
+  status: /tmp/updater/updater.status
+  working_dir: /tmp/updater
+
+monitors:
+  test:
+    file: /usr/bin/test
+    interval: 1h
+    regex: "^test$"
+    repo: owner/repo
+    type: latest
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.config.checksum_verify);
     }
 }

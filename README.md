@@ -8,6 +8,7 @@
 - **正则匹配**：通过正则表达式精确匹配目标 release asset
 - **代理支持**：HTTP 镜像前缀（如 `gh-proxy.com`）和 SOCKS5 代理
 - **存档解压**：自动处理 `.zip` / `.tar.gz` / `.tar.xz` / `.7z` 格式，支持指定提取路径
+- **Checksum 校验**：下载后默认校验 GitHub asset digest 或 Release 中的 checksum 文件，可显式关闭
 - **前后脚本**：替换前后可执行自定义 shell 命令（如停止/重启服务）
 - **文件备份**：更新前自动备份旧版本，打包为 zip 防止意外执行，支持轮转保留
 - **GitHub Token**：支持配置 PAT 以提高 API 速率限制
@@ -45,6 +46,8 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `repo` | GitHub 仓库，格式 `owner/repo` |
 | `type` | `latest`（正式版）或 `pre-release`（预发布） |
 | `language` | 全局语言 `en_us` / `zh_cn`，留空自动检测系统环境（可选） |
+| `working_dir` | 全局工作目录，存放下载和解压的临时文件 |
+| `checksum_verify` | 下载后校验 checksum，默认 `true`；显式设置为 `false` 可关闭 |
 | `extract_path` | 存档内要提取的文件路径，支持 `{tag}` / `{version}` 变量（可选） |
 | `pre_update` | 替换前执行的 shell 脚本，支持多行（可选） |
 | `post_update` | 替换后执行的 shell 脚本，支持多行（可选） |
@@ -58,6 +61,17 @@ cargo build --release --target x86_64-unknown-linux-musl
 | `timeout` | API 请求超时秒数（默认 30） |
 | `download_timeout` | 下载超时秒数（默认 600） |
 | `retry` | 请求失败重试次数（默认 2） |
+
+### Checksum 校验
+
+默认启用，除非在全局配置中显式设置：
+
+```yaml
+config:
+  checksum_verify: false
+```
+
+启用后，程序会优先使用 GitHub API 返回的 asset digest；若 digest 不存在，则尝试从同一个 Release 中查找常见 checksum 文件，例如 `SHA256SUMS`、`checksums.txt`、`<asset>.sha256`、`<asset>.sha256sum` 等。若找不到可用 checksum，或校验不一致，本次更新会中止。
 
 ### 多行脚本
 

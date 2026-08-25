@@ -9,14 +9,15 @@
 //   2. 查询 GitHub Release 并正则匹配目标 asset
 //   3. 版本比对（若配置了 version_check，则执行命令获取本地版本）
 //   4. 与状态文件中的 current_tag 比对（无 version_check 时的备用方案）
-//   5. 下载 asset 并解压
-//   6. 执行 pre_update 脚本
-//   7. 保存故障保护副本 + 历史备份
-//   8. 替换目标二进制文件并设置权限
-//   9. 校验新二进制（若开启 failsafe 且配置了 version_check）
-//  10. 校验失败则恢复故障保护副本；成功则清理故障保护副本
-//  11. 执行 post_update 脚本
-//  12. 更新状态文件并清理临时文件
+//   5. 下载 asset 并校验 checksum
+//   6. 解压归档
+//   7. 执行 pre_update 脚本
+//   8. 保存故障保护副本 + 历史备份
+//   9. 替换目标二进制文件并设置权限
+//  10. 校验新二进制（若开启 failsafe 且配置了 version_check）
+//  11. 校验失败则恢复故障保护副本；成功则清理故障保护副本
+//  12. 执行 post_update 脚本
+//  13. 更新状态文件并清理临时文件
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
@@ -56,14 +57,21 @@ pub async fn check_and_update(
             info!(
                 "[{}] {} ({:.0?})",
                 name,
-                t!("Interval not reached, next check in", "检查间隔未到, 下次检查在"),
+                t!(
+                    "Interval not reached, next check in",
+                    "检查间隔未到, 下次检查在"
+                ),
                 remaining
             );
             return Ok(false);
         }
     }
 
-    info!("[{}] {}", name, t!("Checking for updates...", "检查更新中..."));
+    info!(
+        "[{}] {}",
+        name,
+        t!("Checking for updates...", "检查更新中...")
+    );
 
     // ── 步骤 2：查询 GitHub Release ───────────────────────────
     // 构建 API 客户端（含代理/Token 配置），带重试机制获取 Release 信息
@@ -155,13 +163,45 @@ pub async fn check_and_update(
 
     // ── 步骤 5：下载 asset ────────────────────────────────────
     // 解析最终下载 URL（处理 HTTP 镜像前缀）
-    let download_url =
-        github::resolve_download_url(&asset.browser_download_url, &monitor.proxy);
+    let download_url = github::resolve_download_url(&asset.browser_download_url, &monitor.proxy);
     let download_dest = global.working_dir.join(&asset.name);
 
     // 构建下载客户端（使用更长的超时时间），执行下载
-    let download_client = github::build_download_client(&monitor.proxy, &global.token, global.download_timeout)?;
-    github::download_asset(&download_client, &download_url, &download_dest, global.retry).await?;
+    let download_client =
+        github::build_download_client(&monitor.proxy, &global.token, global.download_timeout)?;
+    github::download_asset(
+        &download_client,
+        &download_url,
+        &download_dest,
+        global.retry,
+    )
+    .await?;
+
+    // checksum 校验默认开启，且必须在解压和执行 pre_update 前完成。
+    // 这样校验失败时不会触碰目标文件，也不会停止正在运行的服务。
+    if global.checksum_verify {
+        if let Err(e) = github::verify_asset_checksum(
+            &download_client,
+            &release,
+            asset,
+            &download_dest,
+            &monitor.proxy,
+            global.retry,
+        )
+        .await
+        {
+            // 已知未通过校验的下载文件不再保留，避免后续误用。
+            let _ = fs::remove_file(&download_dest);
+            return Err(e);
+        }
+    } else {
+        // 允许显式关闭，但在日志中留下可见提示，便于审计自动更新风险。
+        warn!(
+            "[{}] {}",
+            name,
+            t!("Checksum verification disabled", "checksum 校验已关闭")
+        );
+    }
 
     // ── 步骤 6：解压归档 ──────────────────────────────────────
     // 创建解压临时目录
@@ -174,13 +214,17 @@ pub async fn check_and_update(
         .as_ref()
         .map(|p| archive::resolve_extract_path(p, &release.tag_name));
     // 执行解压，获取最终二进制文件路径
-    let binary_path =
-        archive::extract_if_archive(&download_dest, &extract_dir, &resolved_path)?;
+    let binary_path = archive::extract_if_archive(&download_dest, &extract_dir, &resolved_path)?;
 
     // ── 步骤 7：执行 pre_update 脚本 ──────────────────────────
     // 通常用于停止正在运行的服务，避免文件替换时被占用
     if let Some(script) = &monitor.pre_update {
-        info!("[{}] {}: {}", name, t!("Running pre_update", "执行 pre_update"), script);
+        info!(
+            "[{}] {}: {}",
+            name,
+            t!("Running pre_update", "执行 pre_update"),
+            script
+        );
         // pre_update 失败会中止整个更新流程（返回 Err）
         run_script(name, "pre_update", script)?;
     }
@@ -238,18 +282,39 @@ pub async fn check_and_update(
                 error!(
                     "[{}] {}: {}",
                     name,
-                    t!("New binary verification failed, restoring backup", "新二进制校验失败, 正在恢复备份"),
+                    t!(
+                        "New binary verification failed, restoring backup",
+                        "新二进制校验失败, 正在恢复备份"
+                    ),
                     monitor.file.display()
                 );
                 if let Err(e) = backup::restore_failsafe(&monitor.file, name, &global.backup_dir) {
-                    error!("[{}] {}: {}", name, t!("Failed to restore failsafe", "故障保护恢复失败"), e);
+                    error!(
+                        "[{}] {}: {}",
+                        name,
+                        t!("Failed to restore failsafe", "故障保护恢复失败"),
+                        e
+                    );
                 }
                 // allow_post 模式：恢复后仍执行 post_update 脚本以重启服务
                 if monitor.failsafe == FailsafeMode::AllowPost {
                     if let Some(script) = &monitor.post_update {
-                        info!("[{}] {}: {} (allow_post)", name, t!("Running post_update", "执行 post_update"), script);
+                        info!(
+                            "[{}] {}: {} (allow_post)",
+                            name,
+                            t!("Running post_update", "执行 post_update"),
+                            script
+                        );
                         if let Err(e) = run_script(name, "post_update", script) {
-                            warn!("[{}] {}: {}", name, t!("post_update failed (non-fatal)", "post_update 执行失败 (非致命)"), e);
+                            warn!(
+                                "[{}] {}: {}",
+                                name,
+                                t!(
+                                    "post_update failed (non-fatal)",
+                                    "post_update 执行失败 (非致命)"
+                                ),
+                                e
+                            );
                         }
                     }
                 }
@@ -257,7 +322,10 @@ pub async fn check_and_update(
                 cleanup_temp(name, &download_dest, &extract_dir);
                 return Err(anyhow!(
                     "{}",
-                    t!("binary verification failed after update", "更新后二进制校验失败")
+                    t!(
+                        "binary verification failed after update",
+                        "更新后二进制校验失败"
+                    )
                 ));
             }
             // ── 校验通过 ──
@@ -284,9 +352,22 @@ pub async fn check_and_update(
     // ── 步骤 13：执行 post_update 脚本 ────────────────────────
     // 通常用于重启服务。post_update 失败仅记录警告，不影响更新结果
     if let Some(script) = &monitor.post_update {
-        info!("[{}] {}: {}", name, t!("Running post_update", "执行 post_update"), script);
+        info!(
+            "[{}] {}: {}",
+            name,
+            t!("Running post_update", "执行 post_update"),
+            script
+        );
         if let Err(e) = run_script(name, "post_update", script) {
-            warn!("[{}] {}: {}", name, t!("post_update failed (non-fatal)", "post_update 执行失败 (非致命)"), e);
+            warn!(
+                "[{}] {}: {}",
+                name,
+                t!(
+                    "post_update failed (non-fatal)",
+                    "post_update 执行失败 (非致命)"
+                ),
+                e
+            );
         }
     }
 
@@ -311,7 +392,11 @@ pub async fn check_only(
     let mut report: Vec<String> = Vec::new();
 
     // 输出基本信息
-    report.push(format!("{}: {}", t!("Target", "目标文件"), monitor.file.display()));
+    report.push(format!(
+        "{}: {}",
+        t!("Target", "目标文件"),
+        monitor.file.display()
+    ));
     report.push(format!("{}: {}", t!("Repo", "仓库"), monitor.repo));
     report.push(format!(
         "{}: {:?}",
@@ -329,7 +414,10 @@ pub async fn check_only(
             let remaining = monitor.interval - elapsed;
             report.push(format!(
                 "{} ({:.0?})",
-                t!("Interval not reached, next check in", "检查间隔未到, 下次检查在"),
+                t!(
+                    "Interval not reached, next check in",
+                    "检查间隔未到, 下次检查在"
+                ),
                 remaining
             ));
         }
@@ -338,7 +426,11 @@ pub async fn check_only(
     // 输出当前已知版本（来自状态文件）
     if let Some(mon_status) = status.get(name) {
         if let Some(ref tag) = mon_status.current_tag {
-            report.push(format!("{}: {}", t!("Current known tag", "当前已知版本"), tag));
+            report.push(format!(
+                "{}: {}",
+                t!("Current known tag", "当前已知版本"),
+                tag
+            ));
         }
     }
 
@@ -363,11 +455,23 @@ pub async fn check_only(
     if let Some(vc) = &monitor.version_check {
         if let Some(local_version) = detect_local_version(name, vc) {
             let remote_version = normalize_version(&release.tag_name, &vc.strip_prefix);
-            report.push(format!("{}: {}", t!("Local version", "本地版本"), local_version));
-            report.push(format!("{}: {}", t!("Remote version", "远程版本"), remote_version));
+            report.push(format!(
+                "{}: {}",
+                t!("Local version", "本地版本"),
+                local_version
+            ));
+            report.push(format!(
+                "{}: {}",
+                t!("Remote version", "远程版本"),
+                remote_version
+            ));
             if local_version == remote_version {
                 // 版本一致：已是最新
-                report.push(format!("{}: {}", t!("Status", "状态"), t!("up to date", "已是最新")));
+                report.push(format!(
+                    "{}: {}",
+                    t!("Status", "状态"),
+                    t!("up to date", "已是最新")
+                ));
                 return Ok(report);
             }
             // 发现新版本
@@ -495,11 +599,7 @@ fn cleanup_temp(name: &str, download_path: &Path, extract_dir: &Path) {
 /// - `None`         ：命令执行失败 / 正则未匹配 / 无捕获组
 fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> Option<String> {
     // 执行版本检测命令
-    let output = match Command::new("sh")
-        .arg("-c")
-        .arg(&vc.command)
-        .output()
-    {
+    let output = match Command::new("sh").arg("-c").arg(&vc.command).output() {
         Ok(out) => out,
         Err(e) => {
             warn!(
@@ -533,7 +633,10 @@ fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> O
             warn!(
                 "[{}] {}: {}",
                 name,
-                t!("version_check regex compile error", "version_check 正则编译错误"),
+                t!(
+                    "version_check regex compile error",
+                    "version_check 正则编译错误"
+                ),
                 e
             );
             return None;
@@ -548,7 +651,10 @@ fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> O
                 info!(
                     "[{}] {}: {}",
                     name,
-                    t!("version_check detected local version", "version_check 检测到本地版本"),
+                    t!(
+                        "version_check detected local version",
+                        "version_check 检测到本地版本"
+                    ),
                     version
                 );
                 Some(version)
@@ -558,7 +664,10 @@ fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> O
                 warn!(
                     "[{}] {}: {}",
                     name,
-                    t!("version_check regex matched but no capture group found in output", "version_check 正则已匹配但未找到捕获组"),
+                    t!(
+                        "version_check regex matched but no capture group found in output",
+                        "version_check 正则已匹配但未找到捕获组"
+                    ),
                     stdout.trim()
                 );
                 None
@@ -590,10 +699,16 @@ fn detect_local_version(name: &str, vc: &crate::config::VersionCheckConfig) -> O
 fn normalize_version(version: &str, strip_prefix: &Option<String>) -> String {
     let version = version.trim();
     // 去除前导 v/V
-    let version = version.strip_prefix('v').or_else(|| version.strip_prefix('V')).unwrap_or(version);
+    let version = version
+        .strip_prefix('v')
+        .or_else(|| version.strip_prefix('V'))
+        .unwrap_or(version);
     // 去除自定义前缀
     if let Some(prefix) = strip_prefix {
-        version.strip_prefix(prefix.as_str()).unwrap_or(version).to_string()
+        version
+            .strip_prefix(prefix.as_str())
+            .unwrap_or(version)
+            .to_string()
     } else {
         version.to_string()
     }
